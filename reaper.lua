@@ -190,7 +190,7 @@ print("[REAPER] IO: "..tostring(IO.has).." ("..IO.reason..")")
 FEEDBACK_WEBHOOK = "https://proud-hill-8cf1.bigphatnigur.workers.dev/feedback"
 KEY_API = "https://proud-hill-8cf1.bigphatnigur.workers.dev"
 AUTH_TOKEN = ""
-DISCORD_INVITE = "https://discord.gg/YOUR_INVITE_HERE"
+DISCORD_INVITE = "https://discord.gg/FCMFK2Dcb"
 
 function httpPost(url, body)
     if not url or url == "" then return false, "no webhook configured" end
