@@ -1,6 +1,6 @@
 -- REAPER — universal cheat suite. @d9vq on discord.
 -- Paste into ServerScriptService (Script) AND your executor.
--- Feedback routes through Cloudflare Worker: proud-hill-8cf1.bigphatnigur.workers.dev
+-- Feedback + key system route through Cloudflare Worker: proud-hill-8cf1.bigphatnigur.workers.dev
 
 local RS0 = game:GetService("RunService")
 
@@ -10,8 +10,6 @@ if RS0:IsServer() then
     local RS = game:GetService("ReplicatedStorage")
     local HttpService = game:GetService("HttpService")
 
-    -- Routes through the Cloudflare Worker, which forwards to the real Discord webhook.
-    -- The actual Discord webhook URL lives only as a secret inside Cloudflare.
     local FEEDBACK_WEBHOOK = "https://proud-hill-8cf1.bigphatnigur.workers.dev"
 
     local remote = RS:FindFirstChild("ReaperComm")
@@ -191,9 +189,6 @@ print("[REAPER] IO: "..tostring(IO.has).." ("..IO.reason..")")
 
 --==================== FEEDBACK WEBHOOK (Cloudflare Worker) ====================
 FEEDBACK_WEBHOOK = "https://proud-hill-8cf1.bigphatnigur.workers.dev"
-
--- If you set the AUTH_TOKEN secret in Cloudflare, put the same value here.
--- Otherwise leave it as "".
 AUTH_TOKEN = ""
 
 function httpPost(url, body)
@@ -208,7 +203,16 @@ function httpPost(url, body)
         Headers = headers,
         Body = body,
     })
-    if not ok then return false, tostring(res) end
+    if not ok then return false, "request failed: "..tostring(res) end
+    local status = nil
+    local respBody = nil
+    if type(res) == "table" then
+        status = res.StatusCode or res.Status or res.status
+        respBody = res.Body or res.body or res.Data
+    end
+    if status and tonumber(status) and tonumber(status) >= 400 then
+        return false, "HTTP "..tostring(status)..": "..tostring(respBody or "")
+    end
     return true, res
 end
 
@@ -402,7 +406,6 @@ if Net.up then
     end)
 end
 
--- strip [RPR] from the real chat window
 task.spawn(function()
     while not LP:FindFirstChild("PlayerGui") do task.wait(0.1) end
     local pg = LP:FindFirstChild("PlayerGui")
@@ -545,6 +548,140 @@ function deepCopy(t)
     local o = {}
     for k, v in pairs(t) do o[k] = deepCopy(v) end
     return o
+end--==================== KEY SYSTEM (Discord Verification) ====================
+local KEY_API = "https://proud-hill-8cf1.bigphatnigur.workers.dev"
+
+local SESSION_KEY = nil
+
+local function postJSON(path, tbl)
+    local body = game:GetService("HttpService"):JSONEncode(tbl)
+    local ok, res = httpPost(KEY_API .. path, body)
+    if not ok then return nil, tostring(res) end
+    local status = nil
+    local respBody = nil
+    if type(res) == "table" then
+        status = res.StatusCode or res.Status or res.status
+        respBody = res.Body or res.body or res.Data
+    end
+    if status and tonumber(status) and tonumber(status) >= 400 then
+        return nil, "HTTP "..tostring(status)..": "..tostring(respBody or "")
+    end
+    local okDecode, decoded = pcall(function()
+        return game:GetService("HttpService"):JSONDecode(respBody)
+    end)
+    if okDecode then return decoded end
+    return nil, "bad response: "..tostring(respBody)
+end
+
+local function showKeyPrompt()
+    local pg = LP:WaitForChild("PlayerGui")
+    local existing = pg:FindFirstChild("ReaperKeyPrompt")
+    if existing then existing:Destroy() end
+
+    local promptGui = new("ScreenGui", {Name = "ReaperKeyPrompt", ResetOnSpawn = false,
+        IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 20000}, pg)
+
+    local frame = new("Frame", {Size = UDim2.fromOffset(340, 210),
+        Position = UDim2.new(0.5, -170, 0.5, -105),
+        BackgroundColor3 = Theme.panel, BorderSizePixel = 0}, promptGui)
+    corner(frame, 12)
+    tAcc(stroke(frame, Theme.accent, 2, 0.2))
+    grad(frame, Theme.panel2, Theme.bg, 90)
+
+    new("TextLabel", {Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1,
+        Text = "DISCORD VERIFICATION", Font = Enum.Font.GothamBlack, TextSize = 16,
+        TextColor3 = Theme.accent2, ZIndex = 1}, frame)
+
+    local info = new("TextLabel", {Size = UDim2.new(1, -24, 0, 42),
+        Position = UDim2.fromOffset(12, 38), BackgroundTransparency = 1,
+        Text = "You must be a member of the Discord server to use REAPER.\nEnter your Discord username below.",
+        Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = Theme.text,
+        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 1}, frame)
+
+    local tb = new("TextBox", {Size = UDim2.new(1, -24, 0, 32),
+        Position = UDim2.fromOffset(12, 90), BackgroundColor3 = Theme.panel2,
+        Text = "", PlaceholderText = "your Discord username", PlaceholderColor3 = Theme.muted,
+        Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = Theme.text,
+        ClearTextOnFocus = false, BorderSizePixel = 0, ZIndex = 1}, frame)
+    corner(tb, 6)
+    tStroke(stroke(tb, Theme.strokeSoft, 1))
+
+    local btn = new("TextButton", {Size = UDim2.new(1, -24, 0, 34),
+        Position = UDim2.fromOffset(12, 134), BackgroundColor3 = Theme.accent,
+        Text = "VERIFY", Font = Enum.Font.GothamBold, TextSize = 13,
+        TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = false, BorderSizePixel = 0, ZIndex = 1}, frame)
+    corner(btn, 6)
+
+    local status = new("TextLabel", {Size = UDim2.new(1, -24, 0, 20),
+        Position = UDim2.fromOffset(12, 178), BackgroundTransparency = 1,
+        Text = "", Font = Enum.Font.GothamBold, TextSize = 10,
+        TextColor3 = Theme.muted, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 1}, frame)
+
+    local result = {done = false, success = false}
+
+    btn.MouseButton1Click:Connect(function()
+        local uname = (tb.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if uname == "" then
+            status.Text = "Enter a username."
+            status.TextColor3 = Theme.danger
+            return
+        end
+
+        btn.Text = "Verifying…"
+        btn.BackgroundColor3 = Theme.panel3
+        status.Text = "Contacting server…"
+        status.TextColor3 = Theme.muted
+
+        task.spawn(function()
+            local resp, err = postJSON("/verify", {
+                robloxId = tostring(LP.UserId),
+                discordUsername = uname,
+            })
+
+            if not resp then
+                status.Text = "Error: " .. tostring(err)
+                status.TextColor3 = Theme.danger
+                btn.Text = "VERIFY"
+                btn.BackgroundColor3 = Theme.accent
+                return
+            end
+
+            if resp.success and resp.key then
+                SESSION_KEY = resp.key
+                status.Text = "Verified! Loading…"
+                status.TextColor3 = Theme.success
+                task.wait(1.2)
+                promptGui:Destroy()
+                result.done = true
+                result.success = true
+            else
+                status.Text = "Failed: " .. (resp.error or "unknown")
+                status.TextColor3 = Theme.danger
+                btn.Text = "VERIFY"
+                btn.BackgroundColor3 = Theme.accent
+            end
+        end)
+    end)
+
+    while not result.done do task.wait(0.2) end
+    return result.success
+end
+
+local function verifySession()
+    if SESSION_KEY then
+        local resp = postJSON("/check", {
+            robloxId = tostring(LP.UserId),
+            key = SESSION_KEY,
+        })
+        if resp and resp.valid then return true end
+        SESSION_KEY = nil
+    end
+    return showKeyPrompt()
+end
+
+if not verifySession() then
+    warn("[REAPER] Key verification failed. Script locked.")
+    return
 end
 
 --==================== DRAG / RESIZE ====================
@@ -2303,8 +2440,6 @@ do
         Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = Color3.new(1, 1, 1),
         AutoButtonColor = false, ZIndex = 34}, fbHolder)
     corner(fbSend, 5)
-
-    -- ===== Feedback via Cloudflare Worker =====
     fbSend.MouseButton1Click:Connect(function()
         local txt = fbInput.Text or ""
         if txt:gsub("%s", "") == "" then
@@ -2312,14 +2447,12 @@ do
             return
         end
         if #txt > 500 then txt = txt:sub(1, 500) end
-
         local payload = game:GetService("HttpService"):JSONEncode({
             text = txt,
             name = LP.Name,
             userId = tostring(LP.UserId),
             placeId = tostring(game.PlaceId),
         })
-
         if Net.up then
             Net.send("feedback", {text = txt})
             fbInput.Text = ""
@@ -2333,7 +2466,6 @@ do
                 notify("Feedback failed", tostring(res), Theme.danger, 4)
             end
         end
-
         pulse(fbSend, 0.94, 0.06)
         glow(fbSend, Theme.accent2, 0.4)
     end)
