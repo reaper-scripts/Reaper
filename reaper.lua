@@ -190,7 +190,7 @@ print("[REAPER] IO: "..tostring(IO.has).." ("..IO.reason..")")
 FEEDBACK_WEBHOOK = "https://proud-hill-8cf1.bigphatnigur.workers.dev/feedback"
 KEY_API = "https://proud-hill-8cf1.bigphatnigur.workers.dev"
 AUTH_TOKEN = ""
-DISCORD_INVITE = "https://discord.gg/FCMFK2Dcb"
+DISCORD_INVITE = "https://discord.gg/YOUR_INVITE_HERE"
 
 function httpPost(url, body)
     if not url or url == "" then return false, "no webhook configured" end
@@ -552,7 +552,7 @@ function deepCopy(t)
     local o = {}
     for k, v in pairs(t) do o[k] = deepCopy(v) end
     return o
-end--==================== KEY SYSTEM (Redesigned) ====================
+end--==================== KEY SYSTEM (OAuth + auto-browser) ====================
 local SESSION_KEY = nil
 
 local function postJSON(path, tbl)
@@ -575,6 +575,21 @@ local function postJSON(path, tbl)
     return nil, "bad response: "..tostring(respBody)
 end
 
+-- Try everything to open a browser. Falls back to clipboard.
+local function openInBrowser(url)
+    local opened = false
+    if type(deeplink) == "function" then
+        if pcall(deeplink, url) then opened = true end
+    end
+    if not opened and type(openbrowser) == "function" then
+        if pcall(openbrowser, url) then opened = true end
+    end
+    if type(setclipboard) == "function" then
+        pcall(setclipboard, url)
+    end
+    return opened
+end
+
 local function showKeyPrompt()
     local pg = LP:WaitForChild("PlayerGui")
     local existing = pg:FindFirstChild("ReaperKeyPrompt")
@@ -583,21 +598,18 @@ local function showKeyPrompt()
     local promptGui = new("ScreenGui", {Name = "ReaperKeyPrompt", ResetOnSpawn = false,
         IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 20000}, pg)
 
-    -- Full-screen dark backdrop
     local backdrop = new("Frame", {Size = UDim2.fromScale(1, 1),
         BackgroundColor3 = Color3.fromRGB(2, 3, 8), BackgroundTransparency = 1,
         BorderSizePixel = 0, ZIndex = 1}, promptGui)
     Tween:Create(backdrop, TweenInfo.new(0.4), {BackgroundTransparency = 0.35}):Play()
 
-    -- Main card
-    local cardW, cardH = 460, 320
+    local cardW, cardH = 460, 340
     local card = new("Frame", {Size = UDim2.fromOffset(cardW, cardH),
         Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 + 30),
         BackgroundColor3 = Theme.bg, BorderSizePixel = 0, ZIndex = 3}, promptGui)
     corner(card, 18)
     grad(card, Color3.fromRGB(12, 16, 28), Theme.bg, 90)
 
-    -- Animated glow border
     local borderGlow = new("Frame", {Size = UDim2.new(1, 14, 1, 14),
         Position = UDim2.new(0.5, 0, 0.5, 0), AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.65,
@@ -608,7 +620,6 @@ local function showKeyPrompt()
         ColorSequenceKeypoint.new(0.5, Theme.accent3),
         ColorSequenceKeypoint.new(1, Theme.accent),
     })}, borderGlow)
-
     task.spawn(function()
         while borderGlow.Parent do
             for i = 0, 360, 4 do
@@ -619,16 +630,14 @@ local function showKeyPrompt()
         end
     end)
 
-    -- Solid stroke on top
     local cs = stroke(card, Theme.accent, 1.6, 0.15)
 
-    -- Logo circle at top
     local logoCircle = new("Frame", {Size = UDim2.fromOffset(58, 58),
         Position = UDim2.new(0.5, 0, 0, -29), AnchorPoint = Vector2.new(0.5, 0),
         BackgroundColor3 = Theme.panel2, BorderSizePixel = 0, ZIndex = 5}, card)
     corner(logoCircle, 29)
     tAcc(stroke(logoCircle, Theme.accent, 2, 0.05))
-    local logoGrad = grad(logoCircle, Theme.panel3, Theme.panel2, 90)
+    grad(logoCircle, Theme.panel3, Theme.panel2, 90)
     local logoInner = new("Frame", {Size = UDim2.new(1, -12, 1, -12),
         Position = UDim2.new(0.5, 0, 0.5, 0), AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Theme.bg, BorderSizePixel = 0, ZIndex = 6}, logoCircle)
@@ -638,84 +647,38 @@ local function showKeyPrompt()
         Text = "R", Font = Enum.Font.GothamBlack, TextSize = 24,
         TextColor3 = Theme.accent2, ZIndex = 7}, logoInner)
 
-    -- Animate logo aura
-    task.spawn(function()
-        while logoCircle.Parent do
-            Tween:Create(logoCircle, TweenInfo.new(1.8, Enum.EasingStyle.Sine),
-                {Rotation = 8}):Play()
-            task.wait(1.8)
-            if not logoCircle.Parent then return end
-            Tween:Create(logoCircle, TweenInfo.new(1.8, Enum.EasingStyle.Sine),
-                {Rotation = -8}):Play()
-            task.wait(1.8)
-        end
-    end)
-
-    -- Title
     local title = new("TextLabel", {Size = UDim2.new(1, 0, 0, 26),
         Position = UDim2.fromOffset(0, 46), BackgroundTransparency = 1,
-        Text = "DISCORD VERIFICATION", Font = Enum.Font.GothamBlack,
+        Text = "LINK YOUR DISCORD", Font = Enum.Font.GothamBlack,
         TextSize = 17, TextColor3 = Theme.accent2, ZIndex = 4}, card)
     new("UIGradient", {Color = ColorSequence.new({
         ColorSequenceKeypoint.new(0, Theme.accent2),
         ColorSequenceKeypoint.new(1, Theme.accent3),
     })}, title)
 
-    -- Subtitle
-    local sub = new("TextLabel", {Size = UDim2.new(1, -40, 0, 32),
+    local sub = new("TextLabel", {Size = UDim2.new(1, -40, 0, 34),
         Position = UDim2.fromOffset(20, 76), BackgroundTransparency = 1,
-        Text = "You must be a member of the Discord server\nto unlock REAPER.",
+        Text = "Authorize the REAPER app with your Discord account\nto unlock the script.",
         Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = Theme.muted,
         TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 4}, card)
 
-    -- Divider line
     new("Frame", {Size = UDim2.new(1, -56, 0, 1),
-        Position = UDim2.fromOffset(28, 122), BackgroundColor3 = Theme.strokeSoft,
+        Position = UDim2.fromOffset(28, 124), BackgroundColor3 = Theme.strokeSoft,
         BackgroundTransparency = 0.5, BorderSizePixel = 0, ZIndex = 4}, card)
 
-    -- "STEP 01" label
-    new("TextLabel", {Size = UDim2.new(0, 100, 0, 14),
-        Position = UDim2.fromOffset(28, 132), BackgroundTransparency = 1,
-        Text = "STEP 01  ·  ENTER USERNAME", Font = Enum.Font.GothamBold,
-        TextSize = 9, TextColor3 = Theme.accent, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4}, card)
-
-    -- Username input
-    local inputWrap = new("Frame", {Size = UDim2.new(1, -56, 0, 38),
-        Position = UDim2.fromOffset(28, 150), BackgroundColor3 = Theme.panel2,
-        BorderSizePixel = 0, ZIndex = 4}, card)
-    corner(inputWrap, 9)
-    local inputStroke = stroke(inputWrap, Theme.strokeSoft, 1.2, 0.3)
-    local inputGrad = grad(inputWrap, Color3.fromRGB(28, 36, 58), Theme.panel2, 90)
-    new("UIPadding", {PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12)}, inputWrap)
-    local inputIcon = new("TextLabel", {Size = UDim2.fromOffset(20, 38),
-        BackgroundTransparency = 1, Text = "@", Font = Enum.Font.GothamBold,
-        TextSize = 14, TextColor3 = Theme.accent, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5}, inputWrap)
-    local tb = new("TextBox", {Size = UDim2.new(1, -24, 1, 0), Position = UDim2.fromOffset(24, 0),
-        BackgroundTransparency = 1, Text = "",
-        PlaceholderText = "your discord username", PlaceholderColor3 = Theme.muted,
-        Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = Theme.text,
-        ClearTextOnFocus = false, ZIndex = 5,
-        TextXAlignment = Enum.TextXAlignment.Left}, inputWrap)
-    tb.Focused:Connect(function()
-        Tween:Create(inputStroke, TweenInfo.new(0.15), {Color = Theme.accent, Transparency = 0}):Play()
-    end)
-    tb.FocusLost:Connect(function()
-        Tween:Create(inputStroke, TweenInfo.new(0.15), {Color = Theme.strokeSoft, Transparency = 0.3}):Play()
-    end)
-
-    -- Verify button
-    local btn = new("TextButton", {Size = UDim2.new(1, -56, 0, 42),
-        Position = UDim2.fromOffset(28, 200), BackgroundColor3 = Theme.accent,
-        Text = "VERIFY", Font = Enum.Font.GothamBold, TextSize = 14,
+    local btn = new("TextButton", {Size = UDim2.new(1, -56, 0, 52),
+        Position = UDim2.fromOffset(28, 140), BackgroundColor3 = Theme.accent,
+        Text = "🔗  LINK DISCORD", Font = Enum.Font.GothamBold, TextSize = 15,
         TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = false,
         BorderSizePixel = 0, ZIndex = 4}, card)
-    corner(btn, 9)
+    corner(btn, 10)
     local btnGrad = grad(btn, Theme.accent, Theme.accent3, 0)
     local btnStroke = stroke(btn, Theme.accent2, 1.4, 0.4)
+
     local btnShine = new("Frame", {Size = UDim2.new(0.4, 0, 1, 0),
         Position = UDim2.new(-0.5, 0, 0, 0), BackgroundColor3 = Color3.new(1,1,1),
         BackgroundTransparency = 0.75, BorderSizePixel = 0, ZIndex = 5}, btn)
-    corner(btnShine, 9)
+    corner(btnShine, 10)
     new("UIGradient", {Transparency = NumberSequence.new({
         NumberSequenceKeypoint.new(0, 1),
         NumberSequenceKeypoint.new(0.5, 0.4),
@@ -737,22 +700,20 @@ local function showKeyPrompt()
         Tween:Create(btnStroke, TweenInfo.new(0.15), {Transparency = 0.4}):Play()
     end)
 
-    -- Status / step hint area
-    local statusWrap = new("Frame", {Size = UDim2.new(1, -56, 0, 40),
-        Position = UDim2.fromOffset(28, 250), BackgroundTransparency = 1, ZIndex = 4}, card)
-    local dot = new("Frame", {Size = UDim2.fromOffset(6, 6),
+    local statusWrap = new("Frame", {Size = UDim2.new(1, -56, 0, 50),
+        Position = UDim2.fromOffset(28, 208), BackgroundTransparency = 1, ZIndex = 4}, card)
+    local dot = new("Frame", {Size = UDim2.fromOffset(7, 7),
         Position = UDim2.fromOffset(0, 8), BackgroundColor3 = Theme.muted,
         BorderSizePixel = 0, ZIndex = 5}, statusWrap)
-    corner(dot, 3)
+    corner(dot, 4)
     local status = new("TextLabel", {Size = UDim2.new(1, -16, 1, 0),
-        Position = UDim2.fromOffset(14, 0), BackgroundTransparency = 1,
-        Text = "Waiting for input…",
+        Position = UDim2.fromOffset(16, 0), BackgroundTransparency = 1,
+        Text = "Ready. Click LINK DISCORD to begin.",
         Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = Theme.muted,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top,
         TextWrapped = true, ZIndex = 5}, statusWrap)
 
-    -- Footer: discord invite link
     local invite = new("TextButton", {Size = UDim2.new(1, 0, 0, 18),
         Position = UDim2.new(0, 0, 1, -22), BackgroundTransparency = 1,
         Text = "Not in the server?  Join Discord →",
@@ -765,57 +726,42 @@ local function showKeyPrompt()
         Tween:Create(invite, TweenInfo.new(0.15), {TextColor3 = Theme.accent}):Play()
     end)
     invite.MouseButton1Click:Connect(function()
-        if setclipboard then
-            pcall(function() setclipboard(DISCORD_INVITE) end)
-            status.Text = "Invite copied to clipboard!"
-            status.TextColor3 = Theme.accent2
-            dot.BackgroundColor3 = Theme.accent2
-        end
-    end)
-
-    -- Enter key support
-    tb.FocusLost:Connect(function(enterPressed)
-        if enterPressed then
-            btn:SetAttribute("click", true)
-        end
-    end)
-
-    local result = {done = false, success = false}
-
-    local function doVerify()
-        local uname = (tb.Text or ""):gsub("^%s+", ""):gsub("%s+$", ""):gsub("^@", "")
-        if uname == "" then
-            status.Text = "Please enter a username."
-            status.TextColor3 = Theme.danger
-            dot.BackgroundColor3 = Theme.danger
-            pulse(inputWrap, 1.03, 0.1)
-            return
-        end
-
-        btn.Text = "VERIFYING…"
-        btn.BackgroundColor3 = Theme.panel3
-        btnGrad.Color = ColorSequence.new(Theme.panel3, Theme.panel2)
-        status.Text = "Contacting verification server…"
+        openInBrowser(DISCORD_INVITE)
+        status.Text = "Invite copied / opened!"
         status.TextColor3 = Theme.accent2
         dot.BackgroundColor3 = Theme.accent2
+    end)
 
-        task.spawn(function()
-            local resp, err = postJSON("/verify", {
+    card.Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 + 70)
+    card.BackgroundTransparency = 1
+    Tween:Create(card, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+        {Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2), BackgroundTransparency = 0}):Play()
+
+    local result = {done = false, success = false}
+    local sessionId = nil
+    local polling = false
+
+    local function genSession()
+        return "rpr_" .. tostring(LP.UserId) .. "_" ..
+               tostring(math.random(100000, 999999)) .. "_" ..
+               tostring(math.floor(tick() * 1000))
+    end
+
+    local function pollLoop()
+        while polling do
+            task.wait(2)
+            if not polling or not sessionId then break end
+
+            local resp, err = postJSON("/oauth/poll", {
+                session = sessionId,
                 robloxId = tostring(LP.UserId),
-                discordUsername = uname,
             })
 
             if not resp then
-                status.Text = "Connection error: " .. tostring(err)
+                status.Text = "Network error: " .. tostring(err) .. " — retrying…"
                 status.TextColor3 = Theme.danger
                 dot.BackgroundColor3 = Theme.danger
-                btn.Text = "RETRY"
-                btn.BackgroundColor3 = Theme.accent
-                btnGrad.Color = ColorSequence.new(Theme.accent, Theme.accent3)
-                return
-            end
-
-            if resp.success and resp.key then
+            elseif resp.status == "ok" and resp.key then
                 SESSION_KEY = resp.key
                 status.Text = "Verified! Loading REAPER…"
                 status.TextColor3 = Theme.success
@@ -823,38 +769,45 @@ local function showKeyPrompt()
                 btn.Text = "✓ SUCCESS"
                 btn.BackgroundColor3 = Theme.success
                 btnGrad.Color = ColorSequence.new(Theme.success, Theme.accent)
-                task.wait(1.4)
+                polling = false
+                task.wait(1.2)
                 Tween:Create(card, TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
                     {Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 - 20), BackgroundTransparency = 1}):Play()
                 task.wait(0.35)
                 promptGui:Destroy()
                 result.done = true
                 result.success = true
-            else
-                status.Text = "Failed: " .. (resp.error or "unknown")
-                status.TextColor3 = Theme.danger
-                dot.BackgroundColor3 = Theme.danger
-                btn.Text = "TRY AGAIN"
-                btn.BackgroundColor3 = Theme.accent
-                btnGrad.Color = ColorSequence.new(Theme.accent, Theme.accent3)
+                return
+            elseif resp.status == "pending" then
+                dot.BackgroundTransparency = 0.3 + math.sin(tick() * 3) * 0.3
             end
-        end)
+        end
     end
 
-    btn.MouseButton1Click:Connect(doVerify)
-    tb:GetPropertyChangedSignal("Text"):Connect(function()
-        if tb:GetAttribute("__submitted") then return end
-    end)
-    -- re-bind enter behavior cleanly
-    tb.FocusLost:Connect(function(enter)
-        if enter then doVerify() end
-    end)
+    btn.MouseButton1Click:Connect(function()
+        if polling then return end
 
-    -- Entrance animation
-    card.Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 + 70)
-    card.BackgroundTransparency = 1
-    Tween:Create(card, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-        {Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2), BackgroundTransparency = 0}):Play()
+        sessionId = genSession()
+        local link = KEY_API .. "/oauth/start?session=" .. sessionId
+
+        local opened = openInBrowser(link)
+
+        btn.Text = "WAITING FOR AUTH…"
+        btn.BackgroundColor3 = Theme.panel3
+        btnGrad.Color = ColorSequence.new(Theme.panel3, Theme.panel2)
+        dot.BackgroundColor3 = Theme.accent2
+
+        if opened then
+            status.Text = "Browser opened!\nAuthorize with Discord, then return here — it unlocks automatically."
+            status.TextColor3 = Theme.accent2
+        else
+            status.Text = "Link copied to clipboard.\nPaste it into your browser, authorize, then return here."
+            status.TextColor3 = Theme.accent2
+        end
+
+        polling = true
+        task.spawn(pollLoop)
+    end)
 
     while not result.done do task.wait(0.2) end
     return result.success
@@ -1805,7 +1758,7 @@ closeBtn = new("TextButton", {Size = UDim2.fromOffset(24, 24),
 corner(closeBtn, 6)
 closeBtn.MouseButton1Click:Connect(function() closeMenu() end)
 
---==================== TICKER (Redesigned — bigger, bolder) ====================
+--==================== TICKER (bigger/bolder) ====================
 TICKER_HEIGHT = 32
 tickerBar = tPanel(new("Frame", {Size = UDim2.new(1, -20, 0, TICKER_HEIGHT),
     Position = UDim2.fromOffset(10, 46), BackgroundColor3 = Theme.panel,
@@ -1815,7 +1768,6 @@ grad(tickerBar, Color3.fromRGB(10, 16, 30), Color3.fromRGB(4, 6, 14), 90)
 tickerStroke = stroke(tickerBar, Theme.tickerColor, 1.4, 0.3)
 new("UIPadding", {PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 2)}, tickerBar)
 
--- Gradient shimmer on the ticker bar itself
 tickerBarGrad = new("UIGradient", {Color = ColorSequence.new({
     ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 62, 112)),
     ColorSequenceKeypoint.new(0.5, Color3.fromRGB(60, 160, 255)),
@@ -1853,8 +1805,6 @@ task.spawn(function()
         tickerGlow.Position = UDim2.fromOffset(tickerX + 1, 1)
     end)
 end)
-
--- shimmer offset animation on the label gradient
 task.spawn(function()
     local phase = 0
     while tickerLabel.Parent do
@@ -1864,7 +1814,6 @@ task.spawn(function()
     end
 end)
 
--- Positions shifted down to accommodate taller ticker
 rail = tPanel(new("Frame", {Size = UDim2.new(0, 130, 1, -128),
     Position = UDim2.fromOffset(10, 86), BackgroundColor3 = Theme.panel,
     BackgroundTransparency = 0.05, BorderSizePixel = 0, ZIndex = 31}, menu))
