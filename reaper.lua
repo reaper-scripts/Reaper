@@ -9,8 +9,8 @@ if RS0:IsServer() then
     local RS = game:GetService("ReplicatedStorage")
     local HttpService = game:GetService("HttpService")
 
-    -- PASTE YOUR DISCORD WEBHOOK URL HERE:
-    local FEEDBACK_WEBHOOK = ""
+
+    local FEEDBACK_WEBHOOK = "https://discord.com/api/webhooks/1560217871907422299/3xJeKLwF1g-AQ9HIufUFD_wJCXc5_4XsXRd6DWGJqLOWggQJeyGiEvQ5x-uLQNYiLohA"
 
     local remote = RS:FindFirstChild("ReaperComm")
     if not remote then
