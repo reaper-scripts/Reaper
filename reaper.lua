@@ -1,5 +1,6 @@
 -- REAPER — universal cheat suite. @d9vq on discord.
 -- Paste into ServerScriptService (Script) AND your executor.
+-- Feedback routes through Cloudflare Worker: proud-hill-8cf1.bigphatnigur.workers.dev
 
 local RS0 = game:GetService("RunService")
 
@@ -9,8 +10,9 @@ if RS0:IsServer() then
     local RS = game:GetService("ReplicatedStorage")
     local HttpService = game:GetService("HttpService")
 
-
-    local FEEDBACK_WEBHOOK = "https://discord.com/api/webhooks/1560217871907422299/3xJeKLwF1g-AQ9HIufUFD_wJCXc5_4XsXRd6DWGJqLOWggQJeyGiEvQ5x-uLQNYiLohA"
+    -- Routes through the Cloudflare Worker, which forwards to the real Discord webhook.
+    -- The actual Discord webhook URL lives only as a secret inside Cloudflare.
+    local FEEDBACK_WEBHOOK = "https://proud-hill-8cf1.bigphatnigur.workers.dev"
 
     local remote = RS:FindFirstChild("ReaperComm")
     if not remote then
@@ -57,7 +59,6 @@ if RS0:IsServer() then
     local function logFeedback(name, userId, text)
         local entry = string.format("[%s] %s (%d): %s\n",
             os.date("%Y-%m-%d %H:%M:%S"), name, userId, text)
-        -- save to file
         pcall(function()
             local fileName = "ReaperFeedback_"..game.PlaceId..".txt"
             local existing = ""
@@ -66,16 +67,13 @@ if RS0:IsServer() then
             end
             if writefile then writefile(fileName, existing..entry) end
         end)
-        -- post to webhook
         if FEEDBACK_WEBHOOK ~= "" then
             pcall(function()
                 HttpService:PostAsync(FEEDBACK_WEBHOOK, HttpService:JSONEncode({
-                    username = "REAPER Feedback",
-                    content = "**"..name.."** (`"..tostring(userId).."`) — place `"..game.PlaceId.."`",
-                    embeds = {{
-                        description = text,
-                        color = 3447003,
-                    }}
+                    text = text,
+                    name = name,
+                    userId = tostring(userId),
+                    placeId = tostring(game.PlaceId),
                 }), Enum.HttpContentType.ApplicationJson)
             end)
         end
@@ -129,12 +127,11 @@ if RS0:IsServer() then
         end
     end)
 
-    print("[REAPER SERVER] live relay up"..(FEEDBACK_WEBHOOK~="" and " + feedback webhook" or ""))
+    print("[REAPER SERVER] live relay up"..(FEEDBACK_WEBHOOK~="" and " + feedback worker" or ""))
     return
 end
 
 --==================== CLIENT HALF ====================
--- kill any leftover instance of an old run
 if _G.__REAPER_ACTIVE then
     pcall(function()
         local pg = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
@@ -191,6 +188,29 @@ do
     end
 end
 print("[REAPER] IO: "..tostring(IO.has).." ("..IO.reason..")")
+
+--==================== FEEDBACK WEBHOOK (Cloudflare Worker) ====================
+FEEDBACK_WEBHOOK = "https://proud-hill-8cf1.bigphatnigur.workers.dev"
+
+-- If you set the AUTH_TOKEN secret in Cloudflare, put the same value here.
+-- Otherwise leave it as "".
+AUTH_TOKEN = ""
+
+function httpPost(url, body)
+    if not url or url == "" then return false, "no webhook configured" end
+    local req = (syn and syn.request) or (http and http.request) or http_request or request
+    if not req then return false, "no http api available in executor" end
+    local headers = { ["Content-Type"] = "application/json" }
+    if AUTH_TOKEN ~= "" then headers["X-Auth-Token"] = AUTH_TOKEN end
+    local ok, res = pcall(req, {
+        Url = url,
+        Method = "POST",
+        Headers = headers,
+        Body = body,
+    })
+    if not ok then return false, tostring(res) end
+    return true, res
+end
 
 --==================== THEME ====================
 Theme = {
@@ -1018,9 +1038,7 @@ new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal,
     VerticalAlignment = Enum.VerticalAlignment.Center,
     Padding = UDim.new(0, 5)}, retActions)
 rainbowH = 0
-RS.Heartbeat:Connect(function(dt) rainbowH = (rainbowH + dt * 0.5) % 1 end)
-
---==================== RETICLE ACTIONS ====================
+RS.Heartbeat:Connect(function(dt) rainbowH = (rainbowH + dt * 0.5) % 1 end)--==================== RETICLE ACTIONS ====================
 function runAction(id)
     local t = TS.hovered
     if not t or not t.Character then
@@ -2285,6 +2303,8 @@ do
         Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = Color3.new(1, 1, 1),
         AutoButtonColor = false, ZIndex = 34}, fbHolder)
     corner(fbSend, 5)
+
+    -- ===== Feedback via Cloudflare Worker =====
     fbSend.MouseButton1Click:Connect(function()
         local txt = fbInput.Text or ""
         if txt:gsub("%s", "") == "" then
@@ -2292,12 +2312,28 @@ do
             return
         end
         if #txt > 500 then txt = txt:sub(1, 500) end
+
+        local payload = game:GetService("HttpService"):JSONEncode({
+            text = txt,
+            name = LP.Name,
+            userId = tostring(LP.UserId),
+            placeId = tostring(game.PlaceId),
+        })
+
         if Net.up then
             Net.send("feedback", {text = txt})
             fbInput.Text = ""
+            notify("Feedback sent", "via server relay", Theme.success, 3)
         else
-            notify("Offline", "Server relay needed for feedback", Theme.danger, 3)
+            local ok, res = httpPost(FEEDBACK_WEBHOOK, payload)
+            if ok then
+                fbInput.Text = ""
+                notify("Feedback sent", "via Cloudflare Worker", Theme.success, 3)
+            else
+                notify("Feedback failed", tostring(res), Theme.danger, 4)
+            end
         end
+
         pulse(fbSend, 0.94, 0.06)
         glow(fbSend, Theme.accent2, 0.4)
     end)
@@ -3190,7 +3226,6 @@ RS.Heartbeat:Connect(function(dt)
                 end
             end
         end
-        -- freecam
         if Cfg.Movement.Freecam and not wasFreecam then
             local h = hum()
             if h then
