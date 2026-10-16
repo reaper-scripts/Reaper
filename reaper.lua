@@ -3721,6 +3721,7 @@ do
             end
         end)
     end)
+espData = {}
 end--==================== ROLE ESP (MURDERER / SHERIFF DETECTION) ====================
 local roleCache = {} -- Tracks role by UserId
 local roleCheckConnection = nil
@@ -3779,7 +3780,7 @@ task.spawn(function()
 end)
 
 --==================== ESP ====================
-espData = {}
+
 function removeESP(p)
     local d = espData[p]
     if d then
