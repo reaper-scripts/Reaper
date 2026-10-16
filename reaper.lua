@@ -20,7 +20,6 @@ if RS0:IsServer() then
     end
 
     local users = {}
-    local history = {}
     local TIMEOUT = 30
 
     local function prune()
@@ -47,8 +46,74 @@ if RS0:IsServer() then
         bcast("userCount", #list(), list())
     end
 
-    -- Verify-owner cache: don't hammer the worker
-    local VERIFY_CACHE = {}  -- [userId] = {rank=..., discordId=..., expires=...}
+    --==================== GLOBAL CHAT (worker-backed) ====================
+    local CHAT_POLL_INTERVAL = 4
+    local chatSubCount = 0
+    local chatPolling = false
+    local lastChatId = 0
+
+    local function pollChatLoop()
+        if chatPolling then return end
+        chatPolling = true
+        task.spawn(function()
+            while chatSubCount > 0 do
+                task.wait(CHAT_POLL_INTERVAL)
+                if chatSubCount <= 0 then break end
+                local ok, res = pcall(function()
+                    return HttpService:GetAsync(KEY_API .. "/chat/fetch?since=" .. lastChatId .. "&limit=100")
+                end)
+                if ok and res then
+                    local okD, data = pcall(function() return HttpService:JSONDecode(res) end)
+                    if okD and type(data) == "table" and data.messages then
+                        for _, m in ipairs(data.messages) do
+                            if m.id and m.id > lastChatId then lastChatId = m.id end
+                            bcast("chat", m)
+                        end
+                    end
+                end
+            end
+            chatPolling = false
+        end)
+    end
+
+    local function sendChatToWorker(plr, key, text)
+        if not plr or not key or text == "" then return end
+        task.spawn(function()
+            pcall(function()
+                HttpService:PostAsync(
+                    KEY_API .. "/chat/send",
+                    HttpService:JSONEncode({
+                        robloxId = tostring(plr.UserId),
+                        key = tostring(key),
+                        text = tostring(text),
+                        placeId = tostring(game.PlaceId),
+                    }),
+                    Enum.HttpContentType.ApplicationJson
+                )
+            end)
+        end)
+    end
+
+    local function fetchBacklogFor(plr)
+        task.spawn(function()
+            local ok, res = pcall(function()
+                return HttpService:GetAsync(KEY_API .. "/chat/fetch?since=0&limit=100")
+            end)
+            if not ok or not res then return end
+            local okD, data = pcall(function() return HttpService:JSONDecode(res) end)
+            if not okD or type(data) ~= "table" or not data.messages then return end
+            local msgs = data.messages
+            local startIdx = math.max(1, #msgs - 50)
+            for i = startIdx, #msgs do
+                local m = msgs[i]
+                if m.id and m.id > lastChatId then lastChatId = m.id end
+                pcall(function() remote:FireClient(plr, "chat", m) end)
+            end
+        end)
+    end
+
+    --==================== OWNER / MOD VERIFY CACHE ====================
+    local VERIFY_CACHE = {}
     local function verifyOwner(plr, key)
         if not plr or not key or key == "" then return nil end
         local c = VERIFY_CACHE[plr.UserId]
@@ -70,7 +135,6 @@ if RS0:IsServer() then
         return data.rank, data.discordId
     end
 
-    -- Bulk rank lookup for display (crowns in ESP / chat)
     local function fetchRankMap()
         local ids = {}
         for _, p in ipairs(Players:GetPlayers()) do ids[#ids+1] = tostring(p.UserId) end
@@ -99,6 +163,7 @@ if RS0:IsServer() then
         end)
     end
 
+    --==================== FEEDBACK LOG ====================
     local function logFeedback(name, userId, text)
         local entry = string.format("[%s] %s (%d): %s\n",
             os.date("%Y-%m-%d %H:%M:%S"), name, userId, text)
@@ -119,15 +184,13 @@ if RS0:IsServer() then
         print("[REAPER FEEDBACK] "..entry:gsub("%s+$",""))
     end
 
+    --==================== REMOTE HANDLER ====================
     remote.OnServerEvent:Connect(function(plr, channel, payload)
         if not plr or not plr.Parent then return end
 
         if channel == "register" then
             local key = (type(payload) == "table" and tostring(payload.key or "")) or ""
             users[plr] = {lastSeen = tick(), key = key}
-            for _, m in ipairs(history) do
-                pcall(function() remote:FireClient(plr, "chat", m) end)
-            end
             bcastCount()
             scheduleBroadcastRanks()
         elseif channel == "heartbeat" then
@@ -135,6 +198,7 @@ if RS0:IsServer() then
             else users[plr] = {lastSeen = tick()}; bcastCount() end
         elseif channel == "unregister" then
             users[plr] = nil
+            chatSubCount = math.max(0, chatSubCount - 1)
             bcastCount()
             scheduleBroadcastRanks()
         elseif channel == "chat" then
@@ -142,23 +206,15 @@ if RS0:IsServer() then
             local text = tostring(payload.text or ""):gsub("[\n\r]", " ")
             if text == "" then return end
             if #text > 200 then text = text:sub(1,200) end
-            local avatar = tostring(payload.avatar or "")
-            local dname  = tostring(payload.username or "")
-            local ctry   = tostring(payload.country or "")
-            local ccode  = tostring(payload.countryCode or "")
-            if #avatar > 400 then avatar = avatar:sub(1,400) end
-            if #dname  > 64  then dname  = dname:sub(1,64) end
-            if #ctry   > 64  then ctry   = ctry:sub(1,64) end
-            if #ccode  > 4   then ccode  = ccode:sub(1,4) end
-            local msg = {
-                sender = plr.Name, userId = plr.UserId, text = text, time = os.time(),
-                avatar = avatar, discordName = dname,
-                country = ctry, countryCode = ccode,
-            }
-            history[#history+1] = msg
-            if #history > 100 then table.remove(history, 1) end
-            bcast("chat", msg)
-
+            local key = users[plr] and users[plr].key or ""
+            if key == "" then return end
+            sendChatToWorker(plr, key, text)
+        elseif channel == "chatSubscribe" then
+            chatSubCount = chatSubCount + 1
+            fetchBacklogFor(plr)
+            pollChatLoop()
+        elseif channel == "chatUnsubscribe" then
+            chatSubCount = math.max(0, chatSubCount - 1)
         elseif channel == "announce" then
             if type(payload) ~= "table" then return end
             local key = tostring(payload.key or "")
@@ -176,10 +232,126 @@ if RS0:IsServer() then
             }
             print("[REAPER ANNOUNCE] "..plr.Name.." ("..rank.."): "..text)
             bcast("announce", msg)
-
         elseif channel == "requestRanks" then
             local map = fetchRankMap()
             pcall(function() remote:FireClient(plr, "rankMap", map) end)
+
+        --==================== CHAT MODERATION (owner-only) ====================
+        elseif channel == "modBan" then
+            if type(payload) ~= "table" then return end
+            local key = tostring(payload.key or "")
+            local target = tostring(payload.targetDiscordId or "")
+            local reason = tostring(payload.reason or "")
+            if target == "" then return end
+            local rank = verifyOwner(plr, key)
+            if not rank then return end
+            task.spawn(function()
+                local ok, res = pcall(function()
+                    return HttpService:PostAsync(
+                        KEY_API .. "/chat/ban",
+                        HttpService:JSONEncode({
+                            robloxId = tostring(plr.UserId),
+                            key = key,
+                            targetDiscordId = target,
+                            reason = reason,
+                        }),
+                        Enum.HttpContentType.ApplicationJson
+                    )
+                end)
+                local okD, data = false, nil
+                if ok and res then
+                    okD, data = pcall(function() return HttpService:JSONDecode(res) end)
+                end
+                if okD and data and data.ok then
+                    pcall(function() remote:FireClient(plr, "modResult", "banned", target) end)
+                else
+                    pcall(function() remote:FireClient(plr, "modResult", "banFailed", tostring(res)) end)
+                end
+            end)
+
+        elseif channel == "modUnban" then
+            if type(payload) ~= "table" then return end
+            local key = tostring(payload.key or "")
+            local target = tostring(payload.targetDiscordId or "")
+            if target == "" then return end
+            local rank = verifyOwner(plr, key)
+            if not rank then return end
+            task.spawn(function()
+                local ok, res = pcall(function()
+                    return HttpService:PostAsync(
+                        KEY_API .. "/chat/unban",
+                        HttpService:JSONEncode({
+                            robloxId = tostring(plr.UserId),
+                            key = key,
+                            targetDiscordId = target,
+                        }),
+                        Enum.HttpContentType.ApplicationJson
+                    )
+                end)
+                local okD, data = false, nil
+                if ok and res then
+                    okD, data = pcall(function() return HttpService:JSONDecode(res) end)
+                end
+                if okD and data and data.ok then
+                    pcall(function() remote:FireClient(plr, "modResult", "unbanned", target) end)
+                else
+                    pcall(function() remote:FireClient(plr, "modResult", "unbanFailed", tostring(res)) end)
+                end
+            end)
+
+        elseif channel == "modDelete" then
+            if type(payload) ~= "table" then return end
+            local key = tostring(payload.key or "")
+            local messageId = tonumber(payload.messageId) or 0
+            if messageId <= 0 then return end
+            local rank = verifyOwner(plr, key)
+            if not rank then return end
+            task.spawn(function()
+                local ok, res = pcall(function()
+                    return HttpService:PostAsync(
+                        KEY_API .. "/chat/delete",
+                        HttpService:JSONEncode({
+                            robloxId = tostring(plr.UserId),
+                            key = key,
+                            messageId = messageId,
+                        }),
+                        Enum.HttpContentType.ApplicationJson
+                    )
+                end)
+                local okD, data = false, nil
+                if ok and res then
+                    okD, data = pcall(function() return HttpService:JSONDecode(res) end)
+                end
+                if okD and data and data.ok then
+                    bcast("chatDelete", messageId)
+                    pcall(function() remote:FireClient(plr, "modResult", "deleted", tostring(messageId)) end)
+                end
+            end)
+
+        elseif channel == "modListBans" then
+            if type(payload) ~= "table" then return end
+            local key = tostring(payload.key or "")
+            local rank = verifyOwner(plr, key)
+            if not rank then return end
+            task.spawn(function()
+                local ok, res = pcall(function()
+                    return HttpService:PostAsync(
+                        KEY_API .. "/chat/bans",
+                        HttpService:JSONEncode({
+                            robloxId = tostring(plr.UserId),
+                            key = key,
+                        }),
+                        Enum.HttpContentType.ApplicationJson
+                    )
+                end)
+                local okD, data = false, nil
+                if ok and res then
+                    okD, data = pcall(function() return HttpService:JSONDecode(res) end)
+                end
+                if okD and data and data.bans then
+                    pcall(function() remote:FireClient(plr, "modBanList", data.bans) end)
+                end
+            end)
 
         elseif channel == "feedback" then
             if type(payload) ~= "table" then return end
@@ -245,6 +417,7 @@ local VirtualUser = game:GetService("VirtualUser")
 local TCS = game:GetService("TextChatService")
 local RS2 = game:GetService("ReplicatedStorage")
 local PhysicsService = game:GetService("PhysicsService")
+local TextService = game:GetService("TextService")
 local LP = Players.LocalPlayer
 local Cam = workspace.CurrentCamera
 
@@ -280,7 +453,7 @@ print("[REAPER] IO: "..tostring(IO.has).." ("..IO.reason..")")
 
 --==================== OWNER / MOD SYSTEM ====================
 MY_USER = nil
-RemoteRanks = {}  -- [userId] = {rank, discordId, badgeUrl}
+RemoteRanks = {}
 
 BADGE_STYLE = {
     owner = {label = "OWNER", emoji = "👑", color = Color3.fromRGB(255, 214, 106)},
@@ -305,7 +478,7 @@ end
 function isOwner() return getLocalRank() == "owner" end
 function isMod()   return getLocalRank() ~= nil end
 
---==================== COUNTRY + CHAT AVATAR CACHE ====================
+--==================== COUNTRY + AVATAR CACHE ====================
 function flagEmoji(code)
     if not code or #code ~= 2 then return "🌍" end
     code = code:upper()
@@ -469,7 +642,22 @@ do
         Net.remote = r; Net.up = true
         print("[REAPER] server relay connected")
     else
-        print("[REAPER] relay offline — local-only mode")
+        print("[REAPER] relay offline — retrying in background")
+        task.spawn(function()
+            local tries = 0
+            while not Net.up and tries < 120 do
+                tries = tries + 1
+                task.wait(1)
+                local found = RS2:FindFirstChild("ReaperComm")
+                if found and found:IsA("RemoteEvent") then
+                    Net.remote = found
+                    Net.up = true
+                    print("[REAPER] server relay connected (retry "..tries..")")
+                    if SESSION_KEY then Net.send("register", {key = SESSION_KEY}) end
+                    return
+                end
+            end
+        end)
     end
 end
 function Net.send(ch, payload)
@@ -480,13 +668,19 @@ end
 
 --==================== CHAT ====================
 Chat = {messages = {}, listeners = {}, max = 400}
-function addChat(sender, text, isLocal, col, avatar, discordName, country, countryCode, userId)
+chatSeenIds = {}
+function addChat(sender, text, isLocal, col, avatar, discordName, country, countryCode, userId, msgId)
+    if msgId then
+        if chatSeenIds[msgId] then return end
+        chatSeenIds[msgId] = true
+    end
     local e = {
         sender = sender or "?", text = tostring(text or ""),
         isLocal = isLocal and true or false,
         col = col or Color3.fromRGB(148, 204, 255),
         time = tick(), avatar = avatar, discordName = discordName,
         country = country, countryCode = countryCode, userId = userId,
+        msgId = msgId,
     }
     Chat.messages[#Chat.messages+1] = e
     if #Chat.messages > Chat.max then table.remove(Chat.messages, 1) end
@@ -496,14 +690,11 @@ function sendChat(text)
     text = tostring(text or ""):gsub("^%s+",""):gsub("%s+$","")
     if text == "" then return false end
     if #text > 200 then text = text:sub(1,200) end
-    local av = MY_USER and MY_USER.avatar or ""
-    local dn = MY_USER and MY_USER.username or ""
-    local ct = MY_USER and MY_USER.country or ""
-    local cc = MY_USER and MY_USER.countryCode or ""
-    addChat(LP.Name, text, true, Theme.success, av, dn, ct, cc, LP.UserId)
-    if Net.up then
-        Net.send("chat", {text = text, avatar = av, username = dn, country = ct, countryCode = cc})
+    if not Net.up then
+        notify("Chat offline", "Server relay not connected", Theme.danger, 3)
+        return false
     end
+    Net.send("chat", {text = text})
     return true
 end
 
@@ -532,7 +723,16 @@ if Net.up then
         if ch == "chat" then
             if type(a) == "table" and a.sender and a.text then
                 addChat(a.sender, a.text, false, Color3.fromRGB(148, 204, 255),
-                        a.avatar, a.discordName, a.country, a.countryCode, a.userId)
+                        a.avatar, a.discordName, a.country, a.countryCode, a.userId, a.id)
+            end
+        elseif ch == "chatDelete" then
+            if type(a) == "number" and Chat.listeners then
+                -- remove any rows with this msgId
+                for _, fn in ipairs(Chat.listeners) do
+                    if fn and type(fn) == "function" then
+                        pcall(fn, {__deleteMsgId = a})
+                    end
+                end
             end
         elseif ch == "userCount" then
             Net.count = a or 1; Net.users = b or {}
@@ -544,9 +744,20 @@ if Net.up then
             if type(a) == "table" and a.text then showAnnouncement(a) end
         elseif ch == "announceDenied" then
             notify("Announcement denied", tostring(a or ""), Theme.danger, 3)
+        elseif ch == "modResult" then
+            local action, info = tostring(a or ""), tostring(b or "")
+            if action == "banned" then notify("Moderation", "Banned "..info, Theme.success, 3)
+            elseif action == "unbanned" then notify("Moderation", "Unbanned "..info, Theme.success, 3)
+            elseif action == "deleted" then notify("Moderation", "Deleted message #"..info, Theme.success, 3)
+            elseif action == "banFailed" then notify("Ban failed", info, Theme.danger, 3)
+            elseif action == "unbanFailed" then notify("Unban failed", info, Theme.danger, 3)
+            end
+        elseif ch == "modBanList" then
+            if _G.__REAPER_BANLIST_CB then
+                pcall(_G.__REAPER_BANLIST_CB, a or {})
+            end
         end
     end)
-    -- register deferred until SESSION_KEY is known
 end
 
 --==================== CONFIG ====================
@@ -650,10 +861,10 @@ function deepCopy(t)
     local o = {}
     for k, v in pairs(t) do o[k] = deepCopy(v) end
     return o
-end
+end--==================== KEY SYSTEM ====================
+-- Global (not local) so PART 1's relay retry loop can read it
+SESSION_KEY = nil
 
---==================== KEY SYSTEM ====================
-local SESSION_KEY = nil
 local function keyStorePath() return "Reaper_key_" .. tostring(game.PlaceId) .. ".txt" end
 local function loadStoredKey()
     if not IO.has then return nil end
@@ -712,7 +923,9 @@ local function downloadAvatar(url)
     local ok3, assetId = pcall(getcustomasset, cacheFile)
     if ok3 and assetId then return assetId end
     return nil
-end--==================== WELCOME SCREEN ====================
+end
+
+--==================== WELCOME SCREEN ====================
 local function showVerifiedScreen(user)
     local pg = LP:WaitForChild("PlayerGui")
     local existing = pg:FindFirstChild("ReaperVerified")
@@ -870,7 +1083,6 @@ local function showVerifiedScreen(user)
         Font = Enum.Font.Gotham, TextSize = 13,
         TextColor3 = Theme.muted, ZIndex = 12}, card)
 
-    -- Badge pill (owner / mod)
     local pillW = 128
     local pill = new("Frame", {Size = UDim2.fromOffset(pillW, 22),
         Position = UDim2.new(0.5, -pillW/2, 0, nameY + 54),
@@ -1301,7 +1513,6 @@ fetchCountry(function(name, code)
     MY_USER.countryCode = code or ""
 end)
 
--- Now that we have the key, register with the server relay
 if Net.up then
     Net.send("register", {key = SESSION_KEY or ""})
     task.spawn(function()
@@ -1640,97 +1851,6 @@ function notify(title, msg, col, dur)
     end)
 end
 
---==================== ANNOUNCEMENTS ====================
-function showAnnouncement(data)
-    if not annStack or not annStack.Parent then return end
-    local rank  = data.rank or "owner"
-    local style = BADGE_STYLE[rank] or BADGE_STYLE.owner
-    local col   = style.color
-
-    local card = new("Frame", {Size = UDim2.new(1, 0, 0, 0),
-        BackgroundColor3 = Theme.bg, BackgroundTransparency = 0.05,
-        BorderSizePixel = 0, ZIndex = 3, ClipsDescendants = true,
-        AutomaticSize = Enum.AutomaticSize.Y}, annStack)
-    corner(card, 14)
-    local st = stroke(card, col, 2, 0.15)
-    grad(card, Theme.panel2, Theme.bg, 90)
-    dropShadow(card, 14, 14, 0.6)
-
-    local strip = new("Frame", {Size = UDim2.new(1, 0, 0, 3),
-        BackgroundColor3 = col, BorderSizePixel = 0, ZIndex = 4}, card)
-    corner(strip, 2)
-
-    local iconPlate = new("Frame", {Size = UDim2.fromOffset(38, 38),
-        Position = UDim2.fromOffset(14, 14), BackgroundColor3 = col,
-        BackgroundTransparency = 0.85, BorderSizePixel = 0, ZIndex = 4}, card)
-    corner(iconPlate, 19)
-    stroke(iconPlate, col, 1.5, 0.2)
-    new("TextLabel", {Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1, Text = style.emoji, Font = Enum.Font.GothamBlack,
-        TextSize = 20, TextColor3 = col, ZIndex = 5}, iconPlate)
-
-    new("TextLabel", {Size = UDim2.new(1, -80, 0, 20),
-        Position = UDim2.fromOffset(62, 12), BackgroundTransparency = 1,
-        Text = string.upper(style.label) .. " ANNOUNCEMENT",
-        Font = Enum.Font.GothamBlack, TextSize = 11, TextColor3 = col,
-        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5}, card)
-
-    new("TextLabel", {Size = UDim2.new(1, -80, 0, 14),
-        Position = UDim2.fromOffset(62, 30), BackgroundTransparency = 1,
-        Text = "from "..data.sender, Font = Enum.Font.Gotham, TextSize = 10,
-        TextColor3 = Theme.muted, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5}, card)
-
-    local body = new("TextLabel", {Size = UDim2.new(1, -32, 0, 0),
-        Position = UDim2.fromOffset(16, 62), BackgroundTransparency = 1,
-        Text = data.text, Font = Enum.Font.GothamBold, TextSize = 13,
-        TextColor3 = Theme.text, TextWrapped = true,
-        AutomaticSize = Enum.AutomaticSize.Y,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 5}, card)
-    new("UIPadding", {PaddingBottom = UDim.new(0, 16)}, body)
-
-    card.Position = UDim2.new(0, 0, 0, -140)
-    Tween:Create(card, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
-        {Position = UDim2.new(0, 0, 0, 0)}):Play()
-
-    task.spawn(function()
-        while card.Parent do
-            Tween:Create(iconPlate, TweenInfo.new(0.9, Enum.EasingStyle.Sine),
-                {BackgroundTransparency = 0.6}):Play()
-            task.wait(0.9)
-            if not card.Parent then return end
-            Tween:Create(iconPlate, TweenInfo.new(0.9, Enum.EasingStyle.Sine),
-                {BackgroundTransparency = 0.85}):Play()
-            task.wait(0.9)
-        end
-    end)
-
-    local dur = math.clamp(6 + #data.text * 0.045, 6, 16)
-    task.delay(dur, function()
-        if not card or not card.Parent then return end
-        local t = Tween:Create(card, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
-            {Position = UDim2.new(0, 0, 0, -160), BackgroundTransparency = 1})
-        t:Play()
-        Tween:Create(st, TweenInfo.new(0.4), {Transparency = 1}):Play()
-        t.Completed:Connect(function() card:Destroy() end)
-    end)
-end
-
-function sendAnnouncement(text)
-    if not isMod() then
-        notify("Denied", "You are not an owner/mod", Theme.danger, 2)
-        return false
-    end
-    text = tostring(text or ""):gsub("^%s+",""):gsub("%s+$","")
-    if text == "" then return false end
-    if not Net.up then
-        notify("No relay", "Announcements need the server relay", Theme.danger, 3)
-        return false
-    end
-    Net.send("announce", {text = text, key = SESSION_KEY or ""})
-    return true
-end
-
 --==================== SAVE ====================
 function serialize(v, d)
     d = d or 0
@@ -1845,23 +1965,142 @@ if IO.has then
             if ok4 and c2 and c2 ~= "" then autoloadName = c2:gsub("%s+$", "") end
         end
     end)
-end
-
---==================== GUI ROOT ====================
+end--==================== GUI ROOT ====================
 local pg = LP:WaitForChild("PlayerGui")
 gui = new("ScreenGui", {Name = "ReaperUI", ResetOnSpawn = false,
     IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 9999}, pg)
 initNotifs(pg)
 
--- Announcement layer
+--==================== ANNOUNCEMENTS (fixed — no more screen glitch) ====================
 annGui = new("ScreenGui", {Name = "ReaperAnnounce", ResetOnSpawn = false,
     IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 10001}, pg)
-annStack = new("Frame", {Size = UDim2.new(0, 560, 0, 0),
-    Position = UDim2.new(0.5, -280, 0, 60), BackgroundTransparency = 1,
-    AutomaticSize = Enum.AutomaticSize.Y}, annGui)
-new("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder,
-    HorizontalAlignment = Enum.HorizontalAlignment.Center,
-    VerticalAlignment = Enum.VerticalAlignment.Top}, annStack)
+annSlot = new("Frame", {Size = UDim2.new(0, 560, 0, 0),
+    Position = UDim2.new(0.5, 0, 0, 60), AnchorPoint = Vector2.new(0.5, 0),
+    BackgroundTransparency = 1, ZIndex = 1}, annGui)
+annCurrent = nil
+
+function dismissAnnouncement()
+    local c = annCurrent
+    if not c then return end
+    annCurrent = nil
+    if c.card and c.card.Parent then
+        local t = Tween:Create(c.card, TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
+            {Position = UDim2.new(0, 0, 0, -180), BackgroundTransparency = 1})
+        t:Play()
+        if c.stroke then Tween:Create(c.stroke, TweenInfo.new(0.35), {Transparency = 1}):Play() end
+        t.Completed:Connect(function()
+            if c.card and c.card.Parent then c.card:Destroy() end
+        end)
+    end
+end
+
+function showAnnouncement(data)
+    if not annSlot or not annSlot.Parent then return end
+    -- dismiss any current one so we never stack / glitch
+    dismissAnnouncement()
+
+    local rank  = data.rank or "owner"
+    local style = BADGE_STYLE[rank] or BADGE_STYLE.owner
+    local col   = style.color
+
+    -- measure body text with TextService so we know exact height (no AutoSize needed)
+    local cardWidth = 560
+    local bodyPadX = 16
+    local bodyWidth = cardWidth - bodyPadX * 2
+    local bodyText = tostring(data.text or "")
+    local bodyHeight = 22
+    pcall(function()
+        local size = TextService:GetTextSize(bodyText, 13, Enum.Font.GothamBold,
+            Vector2.new(bodyWidth, 500))
+        bodyHeight = math.clamp(size.Y, 22, 220)
+    end)
+
+    local headerH = 62
+    local cardHeight = headerH + bodyHeight + 18
+
+    local card = new("Frame", {Size = UDim2.fromOffset(cardWidth, cardHeight),
+        Position = UDim2.new(0, 0, 0, -180),
+        BackgroundColor3 = Theme.bg, BackgroundTransparency = 0.05,
+        BorderSizePixel = 0, ZIndex = 3, ClipsDescendants = true}, annSlot)
+    corner(card, 14)
+    local st = stroke(card, col, 2, 0.15)
+    grad(card, Theme.panel2, Theme.bg, 90)
+    dropShadow(card, 14, 14, 0.6)
+
+    new("Frame", {Size = UDim2.new(1, 0, 0, 3),
+        BackgroundColor3 = col, BorderSizePixel = 0, ZIndex = 4}, card)
+
+    local iconPlate = new("Frame", {Size = UDim2.fromOffset(38, 38),
+        Position = UDim2.fromOffset(14, 14), BackgroundColor3 = col,
+        BackgroundTransparency = 0.85, BorderSizePixel = 0, ZIndex = 4}, card)
+    corner(iconPlate, 19)
+    stroke(iconPlate, col, 1.5, 0.2)
+    new("TextLabel", {Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1, Text = style.emoji, Font = Enum.Font.GothamBlack,
+        TextSize = 20, TextColor3 = col, ZIndex = 5}, iconPlate)
+
+    new("TextLabel", {Size = UDim2.new(1, -80, 0, 20),
+        Position = UDim2.fromOffset(62, 12), BackgroundTransparency = 1,
+        Text = string.upper(style.label) .. " ANNOUNCEMENT",
+        Font = Enum.Font.GothamBlack, TextSize = 11, TextColor3 = col,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5}, card)
+
+    new("TextLabel", {Size = UDim2.new(1, -80, 0, 14),
+        Position = UDim2.fromOffset(62, 30), BackgroundTransparency = 1,
+        Text = "from "..tostring(data.sender or "?"), Font = Enum.Font.Gotham, TextSize = 10,
+        TextColor3 = Theme.muted, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5}, card)
+
+    new("TextLabel", {Size = UDim2.fromOffset(bodyWidth, bodyHeight),
+        Position = UDim2.fromOffset(bodyPadX, headerH), BackgroundTransparency = 1,
+        Text = bodyText, Font = Enum.Font.GothamBold, TextSize = 13,
+        TextColor3 = Theme.text, TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 5}, card)
+
+    -- slide in
+    Tween:Create(card, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+        {Position = UDim2.new(0, 0, 0, 0)}):Play()
+
+    -- gentle pulse on icon only
+    task.spawn(function()
+        while card.Parent do
+            if iconPlate and iconPlate.Parent then
+                Tween:Create(iconPlate, TweenInfo.new(0.9, Enum.EasingStyle.Sine),
+                    {BackgroundTransparency = 0.6}):Play()
+            end
+            task.wait(0.9)
+            if not card.Parent then return end
+            if iconPlate and iconPlate.Parent then
+                Tween:Create(iconPlate, TweenInfo.new(0.9, Enum.EasingStyle.Sine),
+                    {BackgroundTransparency = 0.85}):Play()
+            end
+            task.wait(0.9)
+        end
+    end)
+
+    local dur = math.clamp(6 + #bodyText * 0.045, 6, 16)
+    annCurrent = {card = card, stroke = st}
+    task.delay(dur, function()
+        if annCurrent and annCurrent.card == card then
+            dismissAnnouncement()
+        end
+    end)
+end
+
+function sendAnnouncement(text)
+    if not isMod() then
+        notify("Denied", "You are not an owner/mod", Theme.danger, 2)
+        return false
+    end
+    text = tostring(text or ""):gsub("^%s+",""):gsub("%s+$","")
+    if text == "" then return false end
+    if not Net.up then
+        notify("No relay", "Announcements need the server relay", Theme.danger, 3)
+        return false
+    end
+    Net.send("announce", {text = text, key = SESSION_KEY or ""})
+    return true
+end
 
 --==================== CROSSHAIR ====================
 crossGui = new("ScreenGui", {Name = "ReaperCross", ResetOnSpawn = false,
@@ -2323,14 +2562,13 @@ grad(header, Color3.fromRGB(34, 72, 128), Color3.fromRGB(7, 11, 24), 90)
 new("Frame", {Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 1, -2),
     BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 32}, header)
 
-tAcc2(new("TextLabel", {Size = UDim2.fromOffset(120, 62), Position = UDim2.fromOffset(16, 0),
+tAcc2(new("TextLabel", {Size = UDim2.fromOffset(110, 62), Position = UDim2.fromOffset(16, 0),
     BackgroundTransparency = 1, Text = "REAPER", Font = Enum.Font.GothamBlack,
     TextSize = 19, TextColor3 = Theme.accent2, TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Center, ZIndex = 32}, header))
 
--- Badge next to title
-local _badgeLbl = new("TextLabel", {Size = UDim2.new(0, 130, 0, 22),
-    Position = UDim2.fromOffset(128, 20), BackgroundTransparency = 1,
+local _badgeLbl = new("TextLabel", {Size = UDim2.new(0, 140, 0, 22),
+    Position = UDim2.fromOffset(122, 20), BackgroundTransparency = 1,
     Text = "", Font = Enum.Font.GothamBlack, TextSize = 12,
     TextColor3 = Theme.gold, TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Center, ZIndex = 32}, header)
@@ -2388,7 +2626,6 @@ task.spawn(function()
             _metaLbl.Text = string.format("%s %s   ⏱ %02d:%02d:%02d",
                 flag, (MY_USER.country ~= "" and MY_USER.country) or "—", hh, mm, ss)
 
-            -- Update badge
             local rank = MY_USER.rank
             local b = rank and BADGE_STYLE[rank]
             if b then
@@ -2556,6 +2793,12 @@ function makeTab(id, title)
         Tween:Create(tabIndicator, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
             {Position = UDim2.fromOffset(6, ty)}):Play()
         ripple(tab, tab.AbsoluteSize.X/2, tab.AbsoluteSize.Y/2, Theme.accent2, 20, 0.5)
+        -- subscribe / unsubscribe chat polling on HOME tab
+        if id == "home" then
+            if Net.up then Net.send("chatSubscribe") end
+        else
+            if Net.up then Net.send("chatUnsubscribe") end
+        end
     end)
     tab.MouseEnter:Connect(function()
         if tab.BackgroundColor3 ~= Theme.accent then
@@ -2701,16 +2944,10 @@ function toggleRow(pageId, path, label, onChange)
                 end
                 TS.humpWasActive = false
             else
-                HUMP.phase = 0
-                HUMP.smoothVel = 0
-                HUMP.smoothAir = 0
-                HUMP.lockTimer = 1.5
-                HUMP.lastTier = "STILL"
-                HUMP.awaitingRespawn = false
-                HUMP.fallHold = 0
-                HUMP.speedMult = 1.0
-                HUMP.ampMult = 1.0
-                HUMP.distMult = 1.0
+                HUMP.phase = 0; HUMP.smoothVel = 0; HUMP.smoothAir = 0
+                HUMP.lockTimer = 1.5; HUMP.lastTier = "STILL"
+                HUMP.awaitingRespawn = false; HUMP.fallHold = 0
+                HUMP.speedMult = 1.0; HUMP.ampMult = 1.0; HUMP.distMult = 1.0
             end
         end
         if fire ~= false and onChange then pcall(onChange, state) end
@@ -3165,13 +3402,19 @@ do
         local h = hum(); if h then h.Health = 0 end
     end)
 
-    section(pg2, "REAPER CHAT", "💬")
-    local chatHolder = tPanel(new("Frame", {Size = UDim2.new(1, 0, 0, 260),
+    section(pg2, "GLOBAL CHAT · cross-game", "🌐")
+    new("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
+        Text = "every REAPER user in every game sees this same chat",
+        Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.muted,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
+
+    local chatHolder = tPanel(new("Frame", {Size = UDim2.new(1, 0, 0, 300),
         BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.1,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2]))
     corner(chatHolder, 10)
     tStroke(stroke(chatHolder, Theme.strokeSoft, 1, 0.4))
-    local chatScroll = new("ScrollingFrame", {Size = UDim2.new(1, -8, 1, -66),
+    local chatScroll = new("ScrollingFrame", {Size = UDim2.new(1, -8, 1, -70),
         Position = UDim2.fromOffset(4, 4), BackgroundTransparency = 1, BorderSizePixel = 0,
         ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.accent,
         CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
@@ -3195,21 +3438,21 @@ do
     task.spawn(function()
         while userBar.Parent do
             local n = Users.count()
-            userLbl.Text = string.format("● %d script user%s live", n, n == 1 and "" or "s")
+            userLbl.Text = string.format("● %d in this server  ·  polling every 4s", n)
             liveDot.BackgroundTransparency = 0.3 + math.sin(tick() * 3) * 0.3
             Users.clean()
             task.wait(1)
         end
     end)
 
-    local inputBar = tPanel2(new("Frame", {Size = UDim2.new(1, -8, 0, 26),
+    local inputBar = tPanel2(new("Frame", {Size = UDim2.new(1, -8, 0, 28),
         Position = UDim2.new(0, 4, 1, -40), BackgroundColor3 = Theme.panel2,
         BorderSizePixel = 0, ZIndex = 34}, chatHolder))
     corner(inputBar, 7)
     tStroke(stroke(inputBar, Theme.strokeSoft, 1))
     new("UIPadding", {PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, inputBar)
     local chatInput = new("TextBox", {Size = UDim2.new(1, -64, 1, 0), BackgroundTransparency = 1,
-        PlaceholderText = "message reaper chat…", PlaceholderColor3 = Theme.muted,
+        PlaceholderText = "message everyone, everywhere…", PlaceholderColor3 = Theme.muted,
         Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = Theme.text, Text = "",
         ClearTextOnFocus = false, ZIndex = 35}, inputBar)
     local sendBtn = new("TextButton", {Size = UDim2.fromOffset(56, 20),
@@ -3218,7 +3461,19 @@ do
         AutoButtonColor = false, ZIndex = 35}, inputBar)
     corner(sendBtn, 5)
 
+    -- track messageId -> row so we can delete
+    local chatRowsById = {}
+
     local function addRow(e)
+        -- handle delete signal
+        if type(e) == "table" and e.__deleteMsgId then
+            local target = chatRowsById[e.__deleteMsgId]
+            if target and target.row and target.row.Parent then
+                target.row:Destroy()
+            end
+            chatRowsById[e.__deleteMsgId] = nil
+            return
+        end
         if not chatScroll.Parent then return end
         local row = new("Frame", {Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1,
             LayoutOrder = (#chatScroll:GetChildren()) + 1, ZIndex = 35,
@@ -3236,7 +3491,6 @@ do
             BackgroundTransparency = 1, ZIndex = 38}, avWrap)
         corner(avBorder, 16)
 
-        -- Badge ring color: if the sender is owner/mod, ring is their badge color
         local senderRank, senderBadgeUrl
         if e.userId then senderRank, senderBadgeUrl = getRankFor(e.userId) end
         local ringCol = e.col or Theme.accent
@@ -3258,20 +3512,23 @@ do
             Position = UDim2.fromOffset(40, 0), BackgroundTransparency = 1,
             AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 36}, row)
 
-        -- Build badge prefix
         local badgePrefix = ""
         if senderRank and BADGE_STYLE[senderRank] then
             local b = BADGE_STYLE[senderRank]
             badgePrefix = string.format('<font color="#%s">%s %s</font>  ', b.color:ToHex(), b.emoji, b.label)
         end
 
-        local flag = flagEmoji(e.countryCode)
-        local headTxt = string.format('<font color="#8FA6BE">%s</font>  %s<font color="#%s"><b>%s</b></font>  <font color="#8FA6BE">%s</font>',
-            os.date("%H:%M", math.floor(e.time or tick())),
+        local placeTag = ""
+        if e.placeId and e.placeId ~= "" and tostring(e.placeId) ~= tostring(game.PlaceId) then
+            placeTag = string.format('  <font color="#6E82B6">[place %s]</font>', tostring(e.placeId))
+        end
+
+        local headTxt = string.format('<font color="#8FA6BE">%s</font>  %s<font color="#%s"><b>%s</b></font>%s',
+            os.date("%H:%M", math.floor((e.time or tick())/1000 > 1e9 and (e.time/1000) or (e.time or tick()))),
             badgePrefix,
             (e.col or Color3.fromRGB(148, 204, 255)):ToHex(),
             (e.discordName and e.discordName ~= "" and ("@"..e.discordName)) or e.sender,
-            flag .. (e.country and e.country ~= "" and ("  "..e.country) or ""))
+            placeTag)
         new("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
             RichText = true, Font = Enum.Font.GothamBold, TextSize = 10,
             TextColor3 = Theme.muted, TextXAlignment = Enum.TextXAlignment.Left,
@@ -3281,6 +3538,10 @@ do
             TextSize = 11, TextColor3 = Theme.text, RichText = true,
             TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
             Position = UDim2.fromOffset(0, 14), Text = e.text or "", ZIndex = 37}, textHolder)
+
+        if e.msgId then
+            chatRowsById[e.msgId] = {row = row, userId = e.userId, discordId = e.discordId}
+        end
 
         task.defer(function()
             chatScroll.CanvasPosition = Vector2.new(0, math.max(0, chatScroll.AbsoluteCanvasSize.Y))
@@ -3293,10 +3554,17 @@ do
         local txt = chatInput.Text or ""
         if txt:gsub("%s", "") == "" then return end
         chatInput.Text = ""
-        sendChat(txt)
+        local ok = sendChat(txt)
+        if ok then
+            pulse(sendBtn, 0.94, 0.06)
+            glow(sendBtn, Theme.accent2, 0.4)
+        end
     end
     sendBtn.MouseButton1Click:Connect(trySend)
     chatInput.FocusLost:Connect(function(enter) if enter then trySend() end end)
+
+    -- subscribe to chat polling (only when HOME visible)
+    if Net.up then Net.send("chatSubscribe") end
 
     section(pg2, "FEEDBACK", "✉️")
     new("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
@@ -3356,10 +3624,10 @@ end
 --====================== OWNER (staff-only) ======================
 if isMod() then
     local pg2 = "owner"
-    section(pg2, "LIVE ANNOUNCEMENTS", "📢")
 
+    section(pg2, "LIVE ANNOUNCEMENTS", "📢")
     new("TextLabel", {Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1,
-        Text = "Broadcast a message to every REAPER user in this server.",
+        Text = "Broadcast a message to every REAPER user in every server.",
         Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.muted,
         TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
@@ -3396,6 +3664,131 @@ if isMod() then
             userId = LP.UserId, rank = getLocalRank() or "owner",
             time = os.time(),
         })
+    end)
+
+    --==================== CHAT MODERATION ====================
+    section(pg2, "CHAT MODERATION", "🛡")
+    new("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
+        Text = "ban by Discord ID · delete individual messages · view ban list",
+        Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.muted,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
+
+    local banBox = tPanel2(new("TextBox", {Size = UDim2.new(1, 0, 0, 30),
+        BackgroundColor3 = Theme.panel2, BackgroundTransparency = 0.1,
+        BorderSizePixel = 0, Text = "",
+        PlaceholderText = "target Discord ID (17-20 digits)",
+        PlaceholderColor3 = Theme.muted, Font = Enum.Font.Gotham,
+        TextSize = 12, TextColor3 = Theme.text,
+        ClearTextOnFocus = false,
+        LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2]))
+    corner(banBox, 7)
+    tStroke(stroke(banBox, Theme.strokeSoft, 1))
+    new("UIPadding", {PaddingLeft = UDim.new(0, 8)}, banBox)
+
+    local reasonBox = tPanel2(new("TextBox", {Size = UDim2.new(1, 0, 0, 30),
+        BackgroundColor3 = Theme.panel2, BackgroundTransparency = 0.1,
+        BorderSizePixel = 0, Text = "",
+        PlaceholderText = "reason (optional)",
+        PlaceholderColor3 = Theme.muted, Font = Enum.Font.Gotham,
+        TextSize = 12, TextColor3 = Theme.text,
+        ClearTextOnFocus = false,
+        LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2]))
+    corner(reasonBox, 7)
+    tStroke(stroke(reasonBox, Theme.strokeSoft, 1))
+    new("UIPadding", {PaddingLeft = UDim.new(0, 8)}, reasonBox)
+
+    buttonRow(pg2, "Ban user from chat", "BAN", function()
+        local target = (banBox.Text or ""):gsub("%s", "")
+        if target == "" then
+            notify("Ban", "Enter a Discord ID first", Theme.gold, 2); return
+        end
+        Net.send("modBan", {
+            key = SESSION_KEY or "",
+            targetDiscordId = target,
+            reason = reasonBox.Text or "",
+        })
+        reasonBox.Text = ""
+    end)
+    buttonRow(pg2, "Unban user", "UNBAN", function()
+        local target = (banBox.Text or ""):gsub("%s", "")
+        if target == "" then
+            notify("Unban", "Enter a Discord ID first", Theme.gold, 2); return
+        end
+        Net.send("modUnban", {
+            key = SESSION_KEY or "",
+            targetDiscordId = target,
+        })
+    end)
+
+    local delBox = tPanel2(new("TextBox", {Size = UDim2.new(1, 0, 0, 30),
+        BackgroundColor3 = Theme.panel2, BackgroundTransparency = 0.1,
+        BorderSizePixel = 0, Text = "",
+        PlaceholderText = "message ID to delete",
+        PlaceholderColor3 = Theme.muted, Font = Enum.Font.Gotham,
+        TextSize = 12, TextColor3 = Theme.text,
+        ClearTextOnFocus = false,
+        LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2]))
+    corner(delBox, 7)
+    tStroke(stroke(delBox, Theme.strokeSoft, 1))
+    new("UIPadding", {PaddingLeft = UDim.new(0, 8)}, delBox)
+
+    buttonRow(pg2, "Delete message", "DELETE MSG", function()
+        local id = tonumber((delBox.Text or ""):gsub("%s","")) or 0
+        if id <= 0 then
+            notify("Delete", "Enter a message ID first", Theme.gold, 2); return
+        end
+        Net.send("modDelete", {key = SESSION_KEY or "", messageId = id})
+        delBox.Text = ""
+    end)
+
+    local banListHolder = tPanel2(new("Frame", {Size = UDim2.new(1, 0, 0, 0),
+        BackgroundColor3 = Theme.panel2, BackgroundTransparency = 0.15,
+        LayoutOrder = #pages[pg2]:GetChildren(), AutomaticSize = Enum.AutomaticSize.Y,
+        ZIndex = 33}, pages[pg2]))
+    corner(banListHolder, 7)
+    tStroke(stroke(banListHolder, Theme.strokeSoft, 1, 0.5))
+    new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, banListHolder)
+    new("UIPadding", {PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6),
+        PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8)}, banListHolder)
+
+    local banListEmpty = tMuted(new("TextLabel", {Size = UDim2.new(1, 0, 0, 20),
+        BackgroundTransparency = 1, Text = "click refresh to load ban list",
+        Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.muted,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = 1, ZIndex = 34}, banListHolder))
+
+    _G.__REAPER_BANLIST_CB = function(bans)
+        for _, c in ipairs(banListHolder:GetChildren()) do
+            if not c:IsA("UIListLayout") and not c:IsA("UIPadding") and c ~= banListEmpty then
+                c:Destroy()
+            end
+        end
+        if not bans or #bans == 0 then
+            banListEmpty.Visible = true
+            banListEmpty.Text = "no banned users"
+            return
+        end
+        banListEmpty.Visible = false
+        for i, b in ipairs(bans) do
+            local row = new("Frame", {Size = UDim2.new(1, 0, 0, 26),
+                BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.3,
+                LayoutOrder = i, ZIndex = 34}, banListHolder)
+            corner(row, 5)
+            stroke(row, Theme.danger, 1, 0.4)
+            new("TextLabel", {Size = UDim2.new(1, -14, 1, 0), Position = UDim2.fromOffset(10, 0),
+                BackgroundTransparency = 1,
+                Text = string.format("%s  ·  %s",
+                    tostring(b.discord_id or "?"),
+                    tostring(b.reason or "no reason")),
+                Font = Enum.Font.Code, TextSize = 10,
+                TextColor3 = Theme.danger, TextXAlignment = Enum.TextXAlignment.Left,
+                ZIndex = 35}, row)
+        end
+    end
+
+    buttonRow(pg2, "Refresh ban list", "REFRESH BANS", function()
+        Net.send("modListBans", {key = SESSION_KEY or ""})
     end)
 
     section(pg2, "ONLINE OWNERS / MODS", "🛡️")
@@ -4236,7 +4629,6 @@ RS.Heartbeat:Connect(function()
                         roleL = roleLabel(p)
                     end
 
-                    -- Owner / mod priority override
                     local rank = getRankFor(p.UserId)
                     local badge = rank and BADGE_STYLE[rank]
                     local nameTagPrefix = ""
@@ -4279,8 +4671,7 @@ RS.Heartbeat:Connect(function()
                             TextColor3 = base, TextStrokeTransparency = 0.3,
                             TextStrokeColor3 = Color3.new(0,0,0),
                             Text = "", Visible = Cfg.Visuals.ShowRole, Parent = bb})
-                        espData[p] = {hl = hl, bb = bb, nameLbl = nl, distLbl = dl, roleLbl = rl,
-                            badge = badge}
+                        espData[p] = {hl = hl, bb = bb, nameLbl = nl, distLbl = dl, roleLbl = rl, badge = badge}
                         d = espData[p]
                     end
                     if d.hl then
@@ -4356,8 +4747,7 @@ function startFly()
         if flyGyro then flyGyro:Destroy() end
         flyGyro = Instance.new("BodyGyro")
         flyGyro.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
-        flyGyro.P = 3000
-        flyGyro.D = 500
+        flyGyro.P = 3000; flyGyro.D = 500
         flyGyro.CFrame = r.CFrame
         flyGyro.Parent = r
     end
@@ -4612,7 +5002,7 @@ function getTargetPlayer()
     return best
 end
 
--- Adaptive tuner: writes multipliers only.
+-- Auto-tuner: multipliers only
 RS.Heartbeat:Connect(function(dt)
     pcall(function()
         if not Cfg.Troll.HumpAutoDetect then return end
