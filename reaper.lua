@@ -389,18 +389,16 @@ HR = {
     autoMode = "Hybrid", fallingUnder = false, lastGood = nil,
     respawnPending = false,
 }
--- HUMP state — auto values are kept separate from Cfg so the slider isn't overwritten
+-- HUMP state. Auto-tuner writes MULTIPLIERS only. Slider is always the base.
 HUMP = {
     phase = 0,
     smoothVel = 0,
     smoothAir = 0,
     lastTier = "STILL",
     lockTimer = 0,
-    -- effective values used when AutoDetect is ON
-    effSpeed = 8,
-    effAmp = 1.5,
-    effDist = 1.6,
-    -- fall / respawn handling
+    speedMult = 1.0,
+    ampMult   = 1.0,
+    distMult  = 1.0,
     fallHold = 0,
     lastGoodCF = nil,
     awaitingRespawn = false,
@@ -1540,8 +1538,7 @@ function ripple(parent, x, y, col, sz, dur)
     t1.Completed:Connect(function() r:Destroy() end)
 end
 
--- FIXED: pulse no longer grows the element over repeated clicks.
--- The original size is cached once on the instance and ALWAYS restored to.
+-- FIXED pulse: caches base size once per instance so rapid clicks don't grow it
 function pulse(inst, sc, dur)
     if not Cfg.UI.Juicy then return end
     if not inst or not inst.Parent then return end
@@ -1552,7 +1549,6 @@ function pulse(inst, sc, dur)
     end
     local s = sc or 1.06
     local b = UDim2.new(base.X.Scale*s, base.X.Offset*s, base.Y.Scale*s, base.Y.Offset*s)
-    -- cancel any in-flight size tween by killing existing tweens on Size
     inst.Size = b
     task.delay(dur or 0.09, function()
         if inst and inst.Parent then
@@ -2438,9 +2434,7 @@ function closeMenu()
     else
         menu.Visible = false
     end
-end
-
---==================== WIDGETS ====================
+end--==================== WIDGETS ====================
 pages = {}; tabs = {}; widgets = {}
 toggleLabels = {}
 pendingKeybind = nil
@@ -2631,6 +2625,9 @@ function toggleRow(pageId, path, label, onChange)
                 HUMP.lastTier = "STILL"
                 HUMP.awaitingRespawn = false
                 HUMP.fallHold = 0
+                HUMP.speedMult = 1.0
+                HUMP.ampMult = 1.0
+                HUMP.distMult = 1.0
             end
         end
         if fire ~= false and onChange then pcall(onChange, state) end
@@ -3014,10 +3011,11 @@ function adRow(key, label, col)
 end
 adRow("Status", "Status:", Theme.success)
 adRow("Target", "Target:", Theme.accent2)
-adRow("UserSpeed", "Your Speed:", Theme.accent2)
-adRow("UserAmp", "Your Amp:", Theme.accent2)
-adRow("UserDist", "Your Dist:", Theme.accent2)
-adRow("AutoSpeed", "Auto Speed:", Theme.accent3)
+adRow("BaseSpeed", "Base Speed:", Theme.accent2)
+adRow("SpeedMult", "Speed ×:", Theme.accent3)
+adRow("EffSpeed", "Effective:", Theme.gold)
+adRow("BaseAmp", "Base Amp:", Theme.accent2)
+adRow("EffAmp", "Eff Amp:", Theme.gold)
 adRow("Tier", "Tier:", Theme.success)
 adRow("Air", "Airborne:", Theme.accent2)
 adRow("Fall", "Fall:", Theme.danger)
@@ -3048,10 +3046,17 @@ refreshAD = function()
         adRows.Status.TextColor3 = Theme.success
     end
     adRows.Target.Text = t and t.Name or "—"
-    adRows.UserSpeed.Text = string.format("%.1f", Cfg.Troll.HumpSpeed)
-    adRows.UserAmp.Text = string.format("%.2f", Cfg.Troll.HumpAmp)
-    adRows.UserDist.Text = string.format("%.2f", Cfg.Troll.HumpDist)
-    adRows.AutoSpeed.Text = Cfg.Troll.HumpAutoDetect and string.format("%.1f", HUMP.effSpeed) or "off"
+
+    local baseSpeed = Cfg.Troll.HumpSpeed
+    local mult = Cfg.Troll.HumpAutoDetect and HUMP.speedMult or 1
+    local effSpeed = math.clamp(baseSpeed * mult, 0.5, 200)
+    local effAmp = math.clamp(Cfg.Troll.HumpAmp * (Cfg.Troll.HumpAutoDetect and HUMP.ampMult or 1), 0.1, 8)
+
+    adRows.BaseSpeed.Text = string.format("%.1f Hz", baseSpeed)
+    adRows.SpeedMult.Text = Cfg.Troll.HumpAutoDetect and string.format("×%.2f", HUMP.speedMult) or "×1.00"
+    adRows.EffSpeed.Text = string.format("%.1f Hz", effSpeed)
+    adRows.BaseAmp.Text = string.format("%.2f", Cfg.Troll.HumpAmp)
+    adRows.EffAmp.Text = string.format("%.2f", effAmp)
     adRows.Tier.Text = HR.tier
     adRows.Air.Text = HR.airborne and "yes" or "no"
     adRows.Fall.Text = HR.fallingUnder and "yes" or "no"
@@ -3066,7 +3071,9 @@ tabTitles = {
     world = "WORLD", players = "PLAYERS", troll = "TROLL", util = "UTIL",
     save = "SAVE", theme = "THEME",
 }
-for _, id in ipairs(tabOrder) do makeTab(id, tabTitles[id]) end--====================== HOME ======================
+for _, id in ipairs(tabOrder) do makeTab(id, tabTitles[id]) end
+
+--====================== HOME ======================
 do
     local pg2 = "home"
     section(pg2, "PROFILE", "👤")
@@ -3504,6 +3511,9 @@ do
                     HUMP.awaitingRespawn = false
                     HUMP.fallHold = 0
                     HUMP.lastGoodCF = nil
+                    HUMP.speedMult = 1.0
+                    HUMP.ampMult = 1.0
+                    HUMP.distMult = 1.0
                     rebuild()
                 end)
             end
@@ -3518,7 +3528,7 @@ do
 
     local hb = collapsible(pg2, "HUMP ENGINE", true)
     toggleRow(hb, "Troll.Hump", "HUMP Target")
-    toggleRow(hb, "Troll.HumpAutoDetect", "Auto-Detect Adaptive")
+    toggleRow(hb, "Troll.HumpAutoDetect", "Auto-Detect Adaptive (scales your slider)")
     toggleRow(hb, "Troll.HumpFallProtect", "Fall / Respawn Protection")
     toggleRow(hb, "UI.AD", "Show Auto-Detect HUD (J)")
     sliderRow(hb, "Troll.HumpSpeed", "Hump Speed (Hz)", 1, 100, 0)
@@ -3818,6 +3828,9 @@ UIS.InputBegan:Connect(function(i, gpe)
             HUMP.lockTimer = 1.0
             HUMP.awaitingRespawn = false
             HUMP.fallHold = 0
+            HUMP.speedMult = 1.0
+            HUMP.ampMult = 1.0
+            HUMP.distMult = 1.0
             notify("Locked on", p.Name, Theme.success, 2.5)
         end
         return
@@ -4417,7 +4430,6 @@ function getTargetPlayer()
         local c = TS.target.Character
         local h = c and c:FindFirstChildOfClass("Humanoid")
         if h and h.Health > 0 then return TS.target end
-        -- target still exists but dead / character reset -> keep as target for respawn wait
         if TS.target.Parent then return TS.target end
     end
     local best, bestD = nil, math.huge
@@ -4436,7 +4448,7 @@ function getTargetPlayer()
     return best
 end
 
--- Adaptive tuner: writes ONLY into HUMP.eff* — user sliders are never overwritten
+-- Auto-tuner: writes ONLY multipliers. Slider is always the base.
 RS.Heartbeat:Connect(function(dt)
     pcall(function()
         if not Cfg.Troll.HumpAutoDetect then return end
@@ -4476,36 +4488,28 @@ RS.Heartbeat:Connect(function(dt)
             HUMP.lockTimer = 0
         end
 
-        local targetSpeed, targetAmp, targetDist
+        local targetSpeedMult, targetAmpMult, targetDistMult
         if HR.tier == "STILL" then
-            targetSpeed, targetAmp, targetDist = 5, 1.0, 1.5
+            targetSpeedMult, targetAmpMult, targetDistMult = 0.75, 0.90, 1.00
         elseif HR.tier == "WALK" then
-            targetSpeed = math.clamp(10 + sm * 0.35, 10, 18)
-            targetAmp   = math.clamp(1.2 + sm * 0.02, 1.2, 1.9)
-            targetDist  = math.clamp(1.6 + sm * 0.005, 1.6, 2.0)
+            targetSpeedMult, targetAmpMult, targetDistMult = 1.15, 1.05, 1.05
         elseif HR.tier == "RUN" then
-            targetSpeed = math.clamp(18 + (sm - 25) * 0.5, 18, 35)
-            targetAmp   = math.clamp(1.5 + (sm - 25) * 0.012, 1.5, 2.2)
-            targetDist  = math.clamp(1.8 + (sm - 25) * 0.005, 1.8, 2.5)
+            targetSpeedMult, targetAmpMult, targetDistMult = 1.65, 1.15, 1.15
         elseif HR.tier == "FAST" then
-            targetSpeed = math.clamp(32 + (sm - 60) * 0.35, 32, 60)
-            targetAmp   = math.clamp(1.8 + (sm - 60) * 0.008, 1.8, 2.6)
-            targetDist  = math.clamp(2.2 + (sm - 60) * 0.003, 2.2, 3.0)
+            targetSpeedMult, targetAmpMult, targetDistMult = 2.15, 1.25, 1.25
         else
-            targetSpeed = math.clamp(55 + (sm - 150) * 0.2, 55, 100)
-            targetAmp   = math.clamp(2.2 + (sm - 150) * 0.005, 2.2, 3.0)
-            targetDist  = math.clamp(2.6 + (sm - 150) * 0.002, 2.6, 3.4)
+            targetSpeedMult, targetAmpMult, targetDistMult = 2.80, 1.35, 1.35
         end
 
         if HR.airborne then
-            targetSpeed = targetSpeed * 1.3
-            targetAmp = targetAmp * 1.15
+            targetSpeedMult = targetSpeedMult * 1.20
+            targetAmpMult   = targetAmpMult   * 1.10
         end
 
         local alpha = 1 - math.exp(-3.5 * dt)
-        HUMP.effSpeed = HUMP.effSpeed + (targetSpeed - HUMP.effSpeed) * alpha
-        HUMP.effAmp   = HUMP.effAmp + (targetAmp - HUMP.effAmp) * alpha
-        HUMP.effDist  = HUMP.effDist + (targetDist - HUMP.effDist) * alpha
+        HUMP.speedMult = HUMP.speedMult + (targetSpeedMult - HUMP.speedMult) * alpha
+        HUMP.ampMult   = HUMP.ampMult   + (targetAmpMult   - HUMP.ampMult)   * alpha
+        HUMP.distMult  = HUMP.distMult  + (targetDistMult  - HUMP.distMult)  * alpha
 
         if HR.tier == "STILL" then HR.autoMode = "Close"
         elseif HR.tier == "EXTREME" then HR.autoMode = "Catch"
@@ -4534,7 +4538,7 @@ RS.Heartbeat:Connect(function(dt)
             end
         end
 
-        --===== HUMP ENGINE (v3) =====
+        --===== HUMP ENGINE (v3) — multipliers, fall protect, respawn hold =====
         if Cfg.Troll.Hump then
             local t = TS.target or getTargetPlayer()
             if t then
@@ -4544,7 +4548,7 @@ RS.Heartbeat:Connect(function(dt)
                     local mH = mC:FindFirstChildOfClass("Humanoid")
                     if not (mR and mH) then return end
 
-                    -- === respawn protection ===
+                    -- respawn hold
                     if HUMP.awaitingRespawn then
                         if t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
                             local newH = t.Character:FindFirstChildOfClass("Humanoid")
@@ -4556,7 +4560,6 @@ RS.Heartbeat:Connect(function(dt)
                                 notify("Target respawned", t.Name, Theme.success, 2)
                             end
                         end
-                        -- hold position; skip all hump logic
                         mR.AssemblyLinearVelocity = Vector3.zero
                         mR.AssemblyAngularVelocity = Vector3.zero
                         if not Cfg.Troll.HumpUsePlatform then
@@ -4571,7 +4574,6 @@ RS.Heartbeat:Connect(function(dt)
                     local tR = t.Character and t.Character:FindFirstChild("HumanoidRootPart")
                     local tH = t.Character and t.Character:FindFirstChildOfClass("Humanoid")
 
-                    -- target lost character / died / respawning
                     if not tR or not tH or tH.Health <= 0 then
                         if Cfg.Troll.HumpFallProtect then
                             HUMP.awaitingRespawn = true
@@ -4582,7 +4584,7 @@ RS.Heartbeat:Connect(function(dt)
                         return
                     end
 
-                    -- === falling under map detection ===
+                    -- falling under map
                     local tY = tR.Position.Y
                     local tVelY = tR.AssemblyLinearVelocity.Y
                     local isFalling = (tY < -40) or (tVelY < -75)
@@ -4590,7 +4592,6 @@ RS.Heartbeat:Connect(function(dt)
                     if isFalling and Cfg.Troll.HumpFallProtect then
                         HR.fallingUnder = true
                         HUMP.fallHold = 2.5
-                        -- freeze above target's last position instead of chasing down
                         if HUMP.lastGoodCF then
                             mR.CFrame = HUMP.lastGoodCF
                             mR.AssemblyLinearVelocity = Vector3.zero
@@ -4610,12 +4611,11 @@ RS.Heartbeat:Connect(function(dt)
                     end
                     HR.fallingUnder = false
 
-                    -- save a "last good" position (above target, safe Y) while target is above -20
                     if tY > -20 then
                         HUMP.lastGoodCF = mR.CFrame
                     end
 
-                    -- === core hump ===
+                    -- core hump
                     if Cfg.Troll.HumpKeepOwner then
                         pcall(function() mR:SetNetworkOwner(LP) end)
                     end
@@ -4625,17 +4625,15 @@ RS.Heartbeat:Connect(function(dt)
                         if mH.PlatformStand then mH.PlatformStand = false end
                     end
 
-                    -- pick speed / amp / dist (auto vs user)
-                    local useSpeed, useAmp, useDist
-                    if Cfg.Troll.HumpAutoDetect then
-                        useSpeed, useAmp, useDist = HUMP.effSpeed, HUMP.effAmp, HUMP.effDist
-                    else
-                        useSpeed = Cfg.Troll.HumpSpeed
-                        useAmp   = Cfg.Troll.HumpAmp
-                        useDist  = Cfg.Troll.HumpDist
-                    end
+                    -- Slider is ALWAYS the base. Auto-Detect only multiplies it.
+                    local sm_ = Cfg.Troll.HumpAutoDetect and HUMP.speedMult or 1
+                    local am_ = Cfg.Troll.HumpAutoDetect and HUMP.ampMult   or 1
+                    local dm_ = Cfg.Troll.HumpAutoDetect and HUMP.distMult  or 1
+                    local useSpeed = math.clamp(Cfg.Troll.HumpSpeed * sm_, 0.5, 200)
+                    local useAmp   = math.clamp(Cfg.Troll.HumpAmp   * am_, 0.1, 8)
+                    local useDist  = math.clamp(Cfg.Troll.HumpDist  * dm_, 0.5, 8)
 
-                    -- accumulate phase (no tick()*speed reset)
+                    -- accumulate phase (no tick() reset), wrap to prevent precision loss
                     HUMP.phase = HUMP.phase + dt * useSpeed
                     if HUMP.phase > math.pi * 2000 then HUMP.phase = HUMP.phase % (math.pi * 2) end
 
@@ -4655,7 +4653,7 @@ RS.Heartbeat:Connect(function(dt)
                         cf = CFrame.lookAt(want, want + look, Vector3.new(0, 1, 0))
                     end
 
-                    -- frame-rate independent smoothing (fast response, no jitter)
+                    -- frame-rate independent smoothing
                     local posAlpha = 1 - math.exp(-25 * dt)
                     mR.CFrame = mR.CFrame:Lerp(cf, posAlpha)
                     mR.AssemblyAngularVelocity = Vector3.zero
@@ -4670,7 +4668,6 @@ RS.Heartbeat:Connect(function(dt)
                     TS.humpWasActive = true
                 end
             else
-                -- no target at all
                 if TS.humpWasActive then
                     local h = hum()
                     if h then
