@@ -10,6 +10,7 @@ if RS0:IsServer() then
     local HttpService = game:GetService("HttpService")
 
     local FEEDBACK_WEBHOOK = "https://proud-hill-8cf1.bigphatnigur.workers.dev/feedback"
+    local KEY_API = "https://proud-hill-8cf1.bigphatnigur.workers.dev"
 
     local remote = RS:FindFirstChild("ReaperComm")
     if not remote then
@@ -28,16 +29,11 @@ if RS0:IsServer() then
             if now - d.lastSeen > TIMEOUT or not p.Parent then users[p] = nil end
         end
     end
-
     local function list()
         local t = {}
-        for p in pairs(users) do
-            if p.Parent then t[#t+1] = p.Name end
-        end
-        table.sort(t)
-        return t
+        for p in pairs(users) do if p.Parent then t[#t+1] = p.Name end end
+        table.sort(t); return t
     end
-
     local function bcast(channel, ...)
         local a = {...}
         local n = select("#", ...)
@@ -47,10 +43,60 @@ if RS0:IsServer() then
             end
         end
     end
-
     local function bcastCount()
-        local l = list()
-        bcast("userCount", #l, l)
+        bcast("userCount", #list(), list())
+    end
+
+    -- Verify-owner cache: don't hammer the worker
+    local VERIFY_CACHE = {}  -- [userId] = {rank=..., discordId=..., expires=...}
+    local function verifyOwner(plr, key)
+        if not plr or not key or key == "" then return nil end
+        local c = VERIFY_CACHE[plr.UserId]
+        if c and tick() < c.expires then return c.rank, c.discordId end
+        local ok, res = pcall(function()
+            return HttpService:PostAsync(
+                KEY_API .. "/verify-owner",
+                HttpService:JSONEncode({robloxId = tostring(plr.UserId), key = tostring(key)}),
+                Enum.HttpContentType.ApplicationJson
+            )
+        end)
+        if not ok or not res then return nil end
+        local okD, data = pcall(function() return HttpService:JSONDecode(res) end)
+        if not okD or type(data) ~= "table" or not data.valid then return nil end
+        VERIFY_CACHE[plr.UserId] = {
+            rank = data.rank, discordId = data.discordId,
+            expires = tick() + 60,
+        }
+        return data.rank, data.discordId
+    end
+
+    -- Bulk rank lookup for display (crowns in ESP / chat)
+    local function fetchRankMap()
+        local ids = {}
+        for _, p in ipairs(Players:GetPlayers()) do ids[#ids+1] = tostring(p.UserId) end
+        if #ids == 0 then return {} end
+        local ok, res = pcall(function()
+            return HttpService:PostAsync(
+                KEY_API .. "/lookup",
+                HttpService:JSONEncode({robloxIds = ids}),
+                Enum.HttpContentType.ApplicationJson
+            )
+        end)
+        if not ok or not res then return {} end
+        local okD, data = pcall(function() return HttpService:JSONDecode(res) end)
+        if not okD or type(data) ~= "table" then return {} end
+        return data.users or {}
+    end
+
+    local ranksDirty = false
+    local function scheduleBroadcastRanks()
+        if ranksDirty then return end
+        ranksDirty = true
+        task.delay(0.6, function()
+            ranksDirty = false
+            local map = fetchRankMap()
+            bcast("rankMap", map)
+        end)
     end
 
     local function logFeedback(name, userId, text)
@@ -59,18 +105,14 @@ if RS0:IsServer() then
         pcall(function()
             local fileName = "ReaperFeedback_"..game.PlaceId..".txt"
             local existing = ""
-            if isfile and isfile(fileName) and readfile then
-                existing = readfile(fileName) or ""
-            end
+            if isfile and isfile(fileName) and readfile then existing = readfile(fileName) or "" end
             if writefile then writefile(fileName, existing..entry) end
         end)
         if FEEDBACK_WEBHOOK ~= "" then
             pcall(function()
                 HttpService:PostAsync(FEEDBACK_WEBHOOK, HttpService:JSONEncode({
-                    text = text,
-                    name = name,
-                    userId = tostring(userId),
-                    placeId = tostring(game.PlaceId),
+                    text = text, name = name,
+                    userId = tostring(userId), placeId = tostring(game.PlaceId),
                 }), Enum.HttpContentType.ApplicationJson)
             end)
         end
@@ -81,17 +123,20 @@ if RS0:IsServer() then
         if not plr or not plr.Parent then return end
 
         if channel == "register" then
-            users[plr] = {lastSeen = tick()}
+            local key = (type(payload) == "table" and tostring(payload.key or "")) or ""
+            users[plr] = {lastSeen = tick(), key = key}
             for _, m in ipairs(history) do
                 pcall(function() remote:FireClient(plr, "chat", m) end)
             end
             bcastCount()
+            scheduleBroadcastRanks()
         elseif channel == "heartbeat" then
             if users[plr] then users[plr].lastSeen = tick()
             else users[plr] = {lastSeen = tick()}; bcastCount() end
         elseif channel == "unregister" then
             users[plr] = nil
             bcastCount()
+            scheduleBroadcastRanks()
         elseif channel == "chat" then
             if type(payload) ~= "table" then return end
             local text = tostring(payload.text or ""):gsub("[\n\r]", " ")
@@ -113,6 +158,29 @@ if RS0:IsServer() then
             history[#history+1] = msg
             if #history > 100 then table.remove(history, 1) end
             bcast("chat", msg)
+
+        elseif channel == "announce" then
+            if type(payload) ~= "table" then return end
+            local key = tostring(payload.key or "")
+            local text = tostring(payload.text or ""):gsub("[\n\r]", " ")
+            if text == "" or key == "" then return end
+            if #text > 300 then text = text:sub(1,300) end
+            local rank, discordId = verifyOwner(plr, key)
+            if not rank then
+                pcall(function() remote:FireClient(plr, "announceDenied", "You are not authorized to announce") end)
+                return
+            end
+            local msg = {
+                text = text, sender = plr.Name, userId = plr.UserId,
+                rank = rank, discordId = discordId, time = os.time(),
+            }
+            print("[REAPER ANNOUNCE] "..plr.Name.." ("..rank.."): "..text)
+            bcast("announce", msg)
+
+        elseif channel == "requestRanks" then
+            local map = fetchRankMap()
+            pcall(function() remote:FireClient(plr, "rankMap", map) end)
+
         elseif channel == "feedback" then
             if type(payload) ~= "table" then return end
             local text = tostring(payload.text or ""):gsub("[\n\r]", " ")
@@ -125,7 +193,12 @@ if RS0:IsServer() then
 
     Players.PlayerRemoving:Connect(function(p)
         users[p] = nil
+        VERIFY_CACHE[p.UserId] = nil
         bcastCount()
+        scheduleBroadcastRanks()
+    end)
+    Players.PlayerAdded:Connect(function(p)
+        task.delay(1, function() scheduleBroadcastRanks() end)
     end)
 
     task.spawn(function()
@@ -133,6 +206,13 @@ if RS0:IsServer() then
             task.wait(5)
             prune()
             bcastCount()
+        end
+    end)
+
+    task.spawn(function()
+        while true do
+            task.wait(45)
+            scheduleBroadcastRanks()
         end
     end)
 
@@ -198,9 +278,34 @@ do
 end
 print("[REAPER] IO: "..tostring(IO.has).." ("..IO.reason..")")
 
---==================== MY USER + COUNTRY + CHAT AVATAR CACHE ====================
+--==================== OWNER / MOD SYSTEM ====================
 MY_USER = nil
+RemoteRanks = {}  -- [userId] = {rank, discordId, badgeUrl}
 
+BADGE_STYLE = {
+    owner = {label = "OWNER", emoji = "👑", color = Color3.fromRGB(255, 214, 106)},
+    mod   = {label = "MOD",   emoji = "🛡️", color = Color3.fromRGB(120, 220, 255)},
+}
+
+function getLocalRank()
+    return MY_USER and MY_USER.rank or nil
+end
+function getRankFor(userId)
+    userId = tonumber(userId) or userId
+    if userId == LP.UserId and MY_USER and MY_USER.rank then
+        return MY_USER.rank, MY_USER.badgeUrl
+    end
+    local r = RemoteRanks[userId] or RemoteRanks[tostring(userId)]
+    if r then return r.rank, r.badgeUrl end
+    return nil, nil
+end
+function getBadgeStyle(rank)
+    return rank and BADGE_STYLE[rank] or nil
+end
+function isOwner() return getLocalRank() == "owner" end
+function isMod()   return getLocalRank() ~= nil end
+
+--==================== COUNTRY + CHAT AVATAR CACHE ====================
 function flagEmoji(code)
     if not code or #code ~= 2 then return "🌍" end
     code = code:upper()
@@ -208,7 +313,6 @@ function flagEmoji(code)
     if a < 0 or a > 25 or b < 0 or b > 25 then return "🌍" end
     return utf8.char(0x1F1E6 + a) .. utf8.char(0x1F1E6 + b)
 end
-
 function fetchCountry(cb)
     task.spawn(function()
         local req = (syn and syn.request) or (http and http.request) or http_request or request
@@ -234,7 +338,6 @@ function fetchCountry(cb)
         cb("Unknown", "")
     end)
 end
-
 chatAvatarCache = {}
 local function strHash(s)
     local h = 5381
@@ -261,10 +364,7 @@ function getChatAvatarAsset(url)
         end
     end
     local ok3, asset = pcall(getcustomasset, fname)
-    if ok3 and asset then
-        chatAvatarCache[url] = asset
-        return asset
-    end
+    if ok3 and asset then chatAvatarCache[url] = asset; return asset end
     chatAvatarCache[url] = false
     return nil
 end
@@ -281,15 +381,9 @@ function httpPost(url, body)
     if not req then return false, "no http api available in executor" end
     local headers = { ["Content-Type"] = "application/json" }
     if AUTH_TOKEN ~= "" then headers["X-Auth-Token"] = AUTH_TOKEN end
-    local ok, res = pcall(req, {
-        Url = url,
-        Method = "POST",
-        Headers = headers,
-        Body = body,
-    })
+    local ok, res = pcall(req, {Url = url, Method = "POST", Headers = headers, Body = body})
     if not ok then return false, "request failed: "..tostring(res) end
-    local status = nil
-    local respBody = nil
+    local status, respBody
     if type(res) == "table" then
         status = res.StatusCode or res.Status or res.status
         respBody = res.Body or res.body or res.Data
@@ -302,60 +396,38 @@ end
 
 --==================== THEME ====================
 Theme = {
-    bg        = Color3.fromRGB(5, 7, 14),
-    bgDeep    = Color3.fromRGB(2, 3, 8),
-    panel     = Color3.fromRGB(13, 17, 30),
-    panel2    = Color3.fromRGB(23, 30, 52),
-    panel3    = Color3.fromRGB(40, 52, 82),
-    stroke    = Color3.fromRGB(76, 138, 232),
-    strokeSoft= Color3.fromRGB(48, 86, 148),
-    accent    = Color3.fromRGB(76, 178, 255),
-    accent2   = Color3.fromRGB(186, 230, 255),
-    accent3   = Color3.fromRGB(202, 112, 255),
-    text      = Color3.fromRGB(242, 248, 255),
-    muted     = Color3.fromRGB(126, 146, 186),
-    success   = Color3.fromRGB(96, 242, 150),
-    danger    = Color3.fromRGB(255, 92, 110),
-    gold      = Color3.fromRGB(255, 214, 106),
-    ticker    = "REAPER · universal cheat suite  ·  @d9vq on discord!",
-    tickerColor  = Color3.fromRGB(90, 205, 255),
-    tickerAccent = Color3.fromRGB(200, 110, 255),
-    sakura = {
-        active = false,
-        leaves = {count = 80, speed = 22, sway = 1.4, size = 5},
-    },
+    bg = Color3.fromRGB(5, 7, 14), bgDeep = Color3.fromRGB(2, 3, 8),
+    panel = Color3.fromRGB(13, 17, 30), panel2 = Color3.fromRGB(23, 30, 52),
+    panel3 = Color3.fromRGB(40, 52, 82),
+    stroke = Color3.fromRGB(76, 138, 232), strokeSoft = Color3.fromRGB(48, 86, 148),
+    accent = Color3.fromRGB(76, 178, 255), accent2 = Color3.fromRGB(186, 230, 255),
+    accent3 = Color3.fromRGB(202, 112, 255),
+    text = Color3.fromRGB(242, 248, 255), muted = Color3.fromRGB(126, 146, 186),
+    success = Color3.fromRGB(96, 242, 150), danger = Color3.fromRGB(255, 92, 110),
+    gold = Color3.fromRGB(255, 214, 106),
+    ticker = "REAPER · universal cheat suite  ·  @d9vq on discord!",
+    tickerColor = Color3.fromRGB(90, 205, 255), tickerAccent = Color3.fromRGB(200, 110, 255),
+    sakura = {active = false, leaves = {count = 80, speed = 22, sway = 1.4, size = 5}},
     snow = {count = 60, speed = 25, size = 2},
     rain = {count = 28, speed = 90, thickness = 2},
 }
 local WINTER = {
-    bg = Color3.fromRGB(5, 7, 14),
-    panel = Color3.fromRGB(13, 17, 30),
-    panel2 = Color3.fromRGB(23, 30, 52),
-    panel3 = Color3.fromRGB(40, 52, 82),
-    stroke = Color3.fromRGB(76, 138, 232),
-    strokeSoft = Color3.fromRGB(48, 86, 148),
-    accent = Color3.fromRGB(76, 178, 255),
-    accent2 = Color3.fromRGB(186, 230, 255),
+    bg = Color3.fromRGB(5, 7, 14), panel = Color3.fromRGB(13, 17, 30),
+    panel2 = Color3.fromRGB(23, 30, 52), panel3 = Color3.fromRGB(40, 52, 82),
+    stroke = Color3.fromRGB(76, 138, 232), strokeSoft = Color3.fromRGB(48, 86, 148),
+    accent = Color3.fromRGB(76, 178, 255), accent2 = Color3.fromRGB(186, 230, 255),
     accent3 = Color3.fromRGB(202, 112, 255),
-    text = Color3.fromRGB(242, 248, 255),
-    muted = Color3.fromRGB(126, 146, 186),
-    tickerColor = Color3.fromRGB(90, 205, 255),
-    tickerAccent = Color3.fromRGB(200, 110, 255),
+    text = Color3.fromRGB(242, 248, 255), muted = Color3.fromRGB(126, 146, 186),
+    tickerColor = Color3.fromRGB(90, 205, 255), tickerAccent = Color3.fromRGB(200, 110, 255),
 }
 local SAKURA = {
-    bg = Color3.fromRGB(22, 10, 22),
-    panel = Color3.fromRGB(44, 20, 40),
-    panel2 = Color3.fromRGB(66, 32, 60),
-    panel3 = Color3.fromRGB(102, 50, 92),
-    stroke = Color3.fromRGB(232, 138, 200),
-    strokeSoft = Color3.fromRGB(158, 84, 138),
-    accent = Color3.fromRGB(255, 118, 188),
-    accent2 = Color3.fromRGB(255, 200, 230),
+    bg = Color3.fromRGB(22, 10, 22), panel = Color3.fromRGB(44, 20, 40),
+    panel2 = Color3.fromRGB(66, 32, 60), panel3 = Color3.fromRGB(102, 50, 92),
+    stroke = Color3.fromRGB(232, 138, 200), strokeSoft = Color3.fromRGB(158, 84, 138),
+    accent = Color3.fromRGB(255, 118, 188), accent2 = Color3.fromRGB(255, 200, 230),
     accent3 = Color3.fromRGB(210, 122, 255),
-    text = Color3.fromRGB(255, 242, 250),
-    muted = Color3.fromRGB(210, 165, 200),
-    tickerColor = Color3.fromRGB(255, 168, 210),
-    tickerAccent = Color3.fromRGB(255, 200, 230),
+    text = Color3.fromRGB(255, 242, 250), muted = Color3.fromRGB(210, 165, 200),
+    tickerColor = Color3.fromRGB(255, 168, 210), tickerAccent = Color3.fromRGB(255, 200, 230),
 }
 function Theme.setPalette(which)
     local S = (which == "Sakura") and SAKURA or WINTER
@@ -364,49 +436,24 @@ function Theme.setPalette(which)
 end
 
 ESPColours = {
-    ally = Color3.fromRGB(70, 150, 255),
-    enemy = Color3.fromRGB(255, 78, 96),
-    police = Color3.fromRGB(70, 150, 255),
-    criminal = Color3.fromRGB(226, 46, 46),
-    prisoner = Color3.fromRGB(255, 156, 62),
-    sheriff = Color3.fromRGB(70, 150, 255),
-    murderer = Color3.fromRGB(226, 46, 46),
-    innocent = Color3.fromRGB(96, 226, 126),
-    united = Color3.fromRGB(56, 138, 255),
-    iron = Color3.fromRGB(226, 46, 46),
+    ally = Color3.fromRGB(70, 150, 255), enemy = Color3.fromRGB(255, 78, 96),
+    police = Color3.fromRGB(70, 150, 255), criminal = Color3.fromRGB(226, 46, 46),
+    prisoner = Color3.fromRGB(255, 156, 62), sheriff = Color3.fromRGB(70, 150, 255),
+    murderer = Color3.fromRGB(226, 46, 46), innocent = Color3.fromRGB(96, 226, 126),
+    united = Color3.fromRGB(56, 138, 255), iron = Color3.fromRGB(226, 46, 46),
 }
 
 --==================== STATE ====================
-TS = {
-    target = nil,
-    hovered = nil,
-    humpWasActive = false,
-    lastSpam = 0,
-}
-HR = {
-    speed = 0, smoothSpeed = 0, tier = "STILL",
-    airborne = false, airTimer = 0, teleporting = false,
-    autoMode = "Hybrid", fallingUnder = false, lastGood = nil,
-    respawnPending = false,
-}
--- HUMP state. Auto-tuner writes MULTIPLIERS only. Slider is always the base.
+TS = {target = nil, hovered = nil, humpWasActive = false, lastSpam = 0}
+HR = {speed = 0, smoothSpeed = 0, tier = "STILL", airborne = false, airTimer = 0,
+      teleporting = false, autoMode = "Hybrid", fallingUnder = false,
+      lastGood = nil, respawnPending = false}
 HUMP = {
-    phase = 0,
-    smoothVel = 0,
-    smoothAir = 0,
-    lastTier = "STILL",
-    lockTimer = 0,
-    speedMult = 1.0,
-    ampMult   = 1.0,
-    distMult  = 1.0,
-    fallHold = 0,
-    lastGoodCF = nil,
-    awaitingRespawn = false,
+    phase = 0, smoothVel = 0, smoothAir = 0, lastTier = "STILL", lockTimer = 0,
+    speedMult = 1.0, ampMult = 1.0, distMult = 1.0,
+    fallHold = 0, lastGoodCF = nil, awaitingRespawn = false,
 }
-RA = {
-    keys = {teleport = nil, spectate = nil, hump = nil},
-    spectateTarget = nil, spectateZoom = 1,
-}
+RA = {keys = {teleport = nil, spectate = nil, hump = nil}, spectateTarget = nil, spectateZoom = 1}
 PREFERRED_KEYS = {
     Enum.KeyCode.One, Enum.KeyCode.Two, Enum.KeyCode.Three,
     Enum.KeyCode.Four, Enum.KeyCode.Five, Enum.KeyCode.Six,
@@ -419,8 +466,7 @@ Net = {remote = nil, up = false, count = 1, users = {}}
 do
     local ok, r = pcall(function() return RS2:WaitForChild("ReaperComm", 5) end)
     if ok and r and r:IsA("RemoteEvent") then
-        Net.remote = r
-        Net.up = true
+        Net.remote = r; Net.up = true
         print("[REAPER] server relay connected")
     else
         print("[REAPER] relay offline — local-only mode")
@@ -434,17 +480,13 @@ end
 
 --==================== CHAT ====================
 Chat = {messages = {}, listeners = {}, max = 400}
-function addChat(sender, text, isLocal, col, avatar, discordName, country, countryCode)
+function addChat(sender, text, isLocal, col, avatar, discordName, country, countryCode, userId)
     local e = {
-        sender = sender or "?",
-        text = tostring(text or ""),
+        sender = sender or "?", text = tostring(text or ""),
         isLocal = isLocal and true or false,
         col = col or Color3.fromRGB(148, 204, 255),
-        time = tick(),
-        avatar = avatar,
-        discordName = discordName,
-        country = country,
-        countryCode = countryCode,
+        time = tick(), avatar = avatar, discordName = discordName,
+        country = country, countryCode = countryCode, userId = userId,
     }
     Chat.messages[#Chat.messages+1] = e
     if #Chat.messages > Chat.max then table.remove(Chat.messages, 1) end
@@ -458,44 +500,30 @@ function sendChat(text)
     local dn = MY_USER and MY_USER.username or ""
     local ct = MY_USER and MY_USER.country or ""
     local cc = MY_USER and MY_USER.countryCode or ""
-    addChat(LP.Name, text, true, Theme.success, av, dn, ct, cc)
+    addChat(LP.Name, text, true, Theme.success, av, dn, ct, cc, LP.UserId)
     if Net.up then
-        Net.send("chat", {
-            text = text, avatar = av, username = dn,
-            country = ct, countryCode = cc,
-        })
+        Net.send("chat", {text = text, avatar = av, username = dn, country = ct, countryCode = cc})
     end
     return true
 end
 
 Users = {seen = {}, window = 45}
-function Users.touch(name)
-    if not name or name == "" then return end
-    Users.seen[name] = tick()
-end
+function Users.touch(name) if name and name ~= "" then Users.seen[name] = tick() end end
 function Users.count()
     if Net.up then return Net.count end
     local now, n = tick(), 0
-    for _, t in pairs(Users.seen) do
-        if now - t <= Users.window then n = n + 1 end
-    end
+    for _, t in pairs(Users.seen) do if now - t <= Users.window then n = n + 1 end end
     return math.max(1, n)
 end
 function Users.list()
     if Net.up then return Net.users end
-    local out = {}
-    local now = tick()
-    for n, t in pairs(Users.seen) do
-        if now - t <= Users.window then out[#out+1] = n end
-    end
-    table.sort(out)
-    return out
+    local out, now = {}, tick()
+    for n, t in pairs(Users.seen) do if now - t <= Users.window then out[#out+1] = n end end
+    table.sort(out); return out
 end
 function Users.clean()
     local now = tick()
-    for n, t in pairs(Users.seen) do
-        if now - t > Users.window then Users.seen[n] = nil end
-    end
+    for n, t in pairs(Users.seen) do if now - t > Users.window then Users.seen[n] = nil end end
 end
 Users.touch(LP.Name)
 
@@ -504,83 +532,63 @@ if Net.up then
         if ch == "chat" then
             if type(a) == "table" and a.sender and a.text then
                 addChat(a.sender, a.text, false, Color3.fromRGB(148, 204, 255),
-                        a.avatar, a.discordName, a.country, a.countryCode)
+                        a.avatar, a.discordName, a.country, a.countryCode, a.userId)
             end
         elseif ch == "userCount" then
-            Net.count = a or 1
-            Net.users = b or {}
+            Net.count = a or 1; Net.users = b or {}
         elseif ch == "feedbackAck" then
             notify("Feedback sent", "Thanks, "..tostring(a).."!", Theme.success, 3)
+        elseif ch == "rankMap" then
+            RemoteRanks = a or {}
+        elseif ch == "announce" then
+            if type(a) == "table" and a.text then showAnnouncement(a) end
+        elseif ch == "announceDenied" then
+            notify("Announcement denied", tostring(a or ""), Theme.danger, 3)
         end
     end)
-    Net.send("register")
-    task.spawn(function()
-        while true do
-            task.wait(10)
-            Net.send("heartbeat")
-        end
-    end)
+    -- register deferred until SESSION_KEY is known
 end
 
 --==================== CONFIG ====================
 Cfg = {
-    Aimbot = {
-        Enabled = false, Key = Enum.UserInputType.MouseButton2, ToggleMode = false,
+    Aimbot = {Enabled = false, Key = Enum.UserInputType.MouseButton2, ToggleMode = false,
         FOV = 180, Smoothness = 8, Strength = 6, TargetPart = "Head",
-        TeamCheck = false, VisibleOnly = false, ShowCircle = true, Humanize = true,
-        MaxDist = 1000,
-    },
-    Trigger = {
-        Enabled = false, Key = Enum.UserInputType.MouseButton1,
-        Radius = 20, Delay = 0.05, TeamCheck = true,
-    },
-    Visuals = {
-        Enabled = false, NameTags = true, Distance = true, ShowRole = true,
+        TeamCheck = false, VisibleOnly = false, ShowCircle = true, Humanize = true, MaxDist = 1000},
+    Trigger = {Enabled = false, Key = Enum.UserInputType.MouseButton1,
+        Radius = 20, Delay = 0.05, TeamCheck = true},
+    Visuals = {Enabled = false, NameTags = true, Distance = true, ShowRole = true,
         Mode = "Team", Fill = 0.55, RainbowSpeed = 0.5,
-        NoFog = false, InfZoom = false, FOVMin = 0.5, FOVMax = 120,
-    },
-    Movement = {
-        Noclip = false, SpeedEnabled = false, Speed = 32,
+        NoFog = false, InfZoom = false, FOVMin = 0.5, FOVMax = 120},
+    Movement = {Noclip = false, SpeedEnabled = false, Speed = 32,
         JumpEnabled = false, JumpPower = 80, InfiniteJump = false,
         Fly = false, FlySpeed = 60, FlySmooth = 12, FlyBoost = 2.5,
         GodMode = false, Freecam = false, FreecamSpeed = 50, FreecamSens = 1,
         Sprint = false, SprintSpeed = 60, Bunnyhop = false,
-        Spinbot = false, AntiFling = false, AntiAFK = false,
-    },
-    World = {
-        Fullbright = false, TimeEnabled = false, Time = 14,
+        Spinbot = false, AntiFling = false, AntiAFK = false},
+    World = {Fullbright = false, TimeEnabled = false, Time = 14,
         GravityEnabled = false, Gravity = 196.2,
-        RemoveBlur = false, FOVEnabled = false, FOV = 70,
-    },
-    Utility = {
-        FlingPower = 60000, FlingDur = 4,
+        RemoveBlur = false, FOVEnabled = false, FOV = 70},
+    Utility = {FlingPower = 60000, FlingDur = 4,
         AutoClicker = false, AutoClickDelay = 0.05,
         AutoRespawn = false, ChatSpam = false, ChatSpamMsg = "REAPER",
-        AutoSheriff = false, AutoSheriffRange = 120,
-    },
-    Troll = {
-        FollowTarget = false, FollowSpeed = 55,
+        AutoSheriff = false, AutoSheriffRange = 120},
+    Troll = {FollowTarget = false, FollowSpeed = 55,
         Hump = false, HumpSpeed = 8, HumpAmp = 1.5, HumpDist = 1.6,
         HumpYawOnly = false, HumpKeepOwner = true, HumpUsePlatform = false,
         HumpOverrideFly = true, HumpVelMatch = true, HumpAutoDetect = true,
-        HumpFallProtect = true,
-        TapTarget = false, TapRadius = 30,
-    },
-    UI = {
-        MenuKey = Enum.KeyCode.X, HUDKey = Enum.KeyCode.H,
+        HumpFallProtect = true, TapTarget = false, TapRadius = 30},
+    UI = {MenuKey = Enum.KeyCode.X, HUDKey = Enum.KeyCode.H,
         HUD = true, ADKey = Enum.KeyCode.J, AD = true,
         MenuOpacity = 0, MenuBlur = true, AnimatedOpen = true,
         MenuResizable = true, MinW = 540, MinH = 420,
-        HUDMovable = true, HUDResizable = true,
-        ADMovable = true, ADResizable = true,
+        HUDMovable = true, HUDResizable = true, ADMovable = true, ADResizable = true,
         Juicy = true, Notifs = true, Ambient = true,
         ShimmerHeaders = true, BorderGlow = true,
         Sakura = false, SakuraLeaves = 80, SakuraSpeed = 22,
         Crosshair = true, CrosshairSize = 26, CrosshairThick = 2,
         CrosshairPulse = true, HideCrossOnMenu = true,
         ReticleRings = true, ReticleLine = true, ReticleHP = true,
-        ReticleMode = "Auto", ReticleR = 140, ReticleG = 220, ReticleB = 255,
-    },
+        ReticleMode = "Auto", ReticleR = 140, ReticleG = 220, ReticleB = 255},
     Binds = {},
 }
 
@@ -593,26 +601,20 @@ function new(cls, props, parent)
 end
 function corner(i, r) return new("UICorner", {CornerRadius = UDim.new(0, r or 6)}, i) end
 function stroke(i, col, th, tr)
-    return new("UIStroke", {
-        Color = col, Thickness = th or 1, Transparency = tr or 0,
-        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-    }, i)
+    return new("UIStroke", {Color = col, Thickness = th or 1, Transparency = tr or 0,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, i)
 end
 function grad(i, c1, c2, rot)
     return new("UIGradient", {Color = ColorSequence.new(c1, c2), Rotation = rot or 90}, i)
 end
 function dropShadow(parent, radius, spread, transparency)
-    local sh = new("Frame", {
-        Size = UDim2.new(1, spread or 12, 1, spread or 12),
+    local sh = new("Frame", {Size = UDim2.new(1, spread or 12, 1, spread or 12),
         Position = UDim2.new(0.5, 0, 0.5, (spread or 12) / 4),
         AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Color3.new(0, 0, 0),
         BackgroundTransparency = transparency or 0.55,
-        BorderSizePixel = 0,
-        ZIndex = (parent.ZIndex or 1) - 1,
-    }, parent.Parent)
-    corner(sh, radius or 18)
-    return sh
+        BorderSizePixel = 0, ZIndex = (parent.ZIndex or 1) - 1}, parent.Parent)
+    corner(sh, radius or 18); return sh
 end
 function hum() local c = LP.Character; return c and c:FindFirstChildOfClass("Humanoid") end
 function hrp() local c = LP.Character; return c and c:FindFirstChild("HumanoidRootPart") end
@@ -652,9 +654,7 @@ end
 
 --==================== KEY SYSTEM ====================
 local SESSION_KEY = nil
-
 local function keyStorePath() return "Reaper_key_" .. tostring(game.PlaceId) .. ".txt" end
-
 local function loadStoredKey()
     if not IO.has then return nil end
     local ok, exists = pcall(IO.isfile, keyStorePath())
@@ -686,7 +686,6 @@ local function postJSON(path, tbl)
     if okD then return decoded end
     return nil, "bad response"
 end
-
 local function copyToClipboard(url)
     if type(setclipboard) == "function" then return pcall(setclipboard, url) end
     return false
@@ -706,16 +705,14 @@ local function downloadAvatar(url)
     if not ok or not exists then
         local req = (syn and syn.request) or (http and http.request) or http_request or request
         if not req then return nil end
-        local ok2, res = pcall(req, { Url = url, Method = "GET" })
+        local ok2, res = pcall(req, {Url = url, Method = "GET"})
         if not ok2 or type(res) ~= "table" or not res.Body then return nil end
         pcall(IO.write, cacheFile, res.Body)
     end
     local ok3, assetId = pcall(getcustomasset, cacheFile)
     if ok3 and assetId then return assetId end
     return nil
-end
-
---==================== WELCOME SCREEN ====================
+end--==================== WELCOME SCREEN ====================
 local function showVerifiedScreen(user)
     local pg = LP:WaitForChild("PlayerGui")
     local existing = pg:FindFirstChild("ReaperVerified")
@@ -761,7 +758,7 @@ local function showVerifiedScreen(user)
         end
     end)
 
-    local cardW, cardH = 470, 440
+    local cardW, cardH = 470, 460
     local card = new("Frame", {Size = UDim2.fromOffset(cardW, cardH),
         Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 + 40),
         BackgroundColor3 = Theme.bg, BorderSizePixel = 0, ZIndex = 10,
@@ -814,12 +811,8 @@ local function showVerifiedScreen(user)
         {Size = UDim2.fromOffset(avatarSize + 16, avatarSize + 16), BackgroundTransparency = 0.85})
     local glowTween2 = Tween:Create(avatarGlow, TweenInfo.new(2.4, Enum.EasingStyle.Sine),
         {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.72})
-    glowTween1.Completed:Connect(function()
-        if avatarGlow.Parent then glowTween2:Play() end
-    end)
-    glowTween2.Completed:Connect(function()
-        if avatarGlow.Parent then glowTween1:Play() end
-    end)
+    glowTween1.Completed:Connect(function() if avatarGlow.Parent then glowTween2:Play() end end)
+    glowTween2.Completed:Connect(function() if avatarGlow.Parent then glowTween1:Play() end end)
     glowTween1:Play()
 
     local avatarHolder = new("Frame", {Size = UDim2.fromScale(1, 1),
@@ -877,6 +870,7 @@ local function showVerifiedScreen(user)
         Font = Enum.Font.Gotham, TextSize = 13,
         TextColor3 = Theme.muted, ZIndex = 12}, card)
 
+    -- Badge pill (owner / mod)
     local pillW = 128
     local pill = new("Frame", {Size = UDim2.fromOffset(pillW, 22),
         Position = UDim2.new(0.5, -pillW/2, 0, nameY + 54),
@@ -884,9 +878,17 @@ local function showVerifiedScreen(user)
         BorderSizePixel = 0, ZIndex = 12}, card)
     corner(pill, 11)
     tStroke(stroke(pill, Theme.success, 1.2, 0.25))
-    new("TextLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+    local pillLbl = new("TextLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
         Text = "● MEMBER VERIFIED", Font = Enum.Font.GothamBold, TextSize = 10,
         TextColor3 = Theme.success, ZIndex = 13}, pill)
+
+    if user.rank and BADGE_STYLE[user.rank] then
+        local b = BADGE_STYLE[user.rank]
+        pill.BackgroundColor3 = b.color
+        pillLbl.Text = b.emoji.." "..b.label
+        pillLbl.TextColor3 = b.color
+        pcall(function() pill:FindFirstChildOfClass("UIStroke").Color = b.color end)
+    end
 
     local btnY = nameY + 92
     local loadBtn = new("TextButton", {Size = UDim2.new(1, -60, 0, 56),
@@ -940,7 +942,6 @@ local function showVerifiedScreen(user)
         done = true
         loadBtn.Text = "LOADING…"
         loadBtn.BackgroundColor3 = Theme.success
-        loadBtn.TextColor3 = Color3.new(1, 1, 1)
         task.wait(0.35)
         Tween:Create(card, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
             {Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 - 40), BackgroundTransparency = 1}):Play()
@@ -1045,7 +1046,6 @@ local function showKeyPrompt()
     corner(s1, 14)
     local s1Stroke = stroke(s1, Theme.strokeSoft, 1.2, 0.4)
     grad(s1, Color3.fromRGB(24, 34, 58), Theme.panel, 90)
-
     local s1Tag = new("Frame", {Size = UDim2.fromOffset(28, 28),
         Position = UDim2.fromOffset(16, 16), BackgroundColor3 = Theme.accent,
         BorderSizePixel = 0, ZIndex = 13}, s1)
@@ -1053,7 +1053,6 @@ local function showKeyPrompt()
     local s1TagLbl = new("TextLabel", {Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1, Text = "1", Font = Enum.Font.GothamBlack,
         TextSize = 13, TextColor3 = Color3.new(1,1,1), ZIndex = 14}, s1Tag)
-
     new("TextLabel", {Size = UDim2.new(1, -60, 0, 18),
         Position = UDim2.fromOffset(52, 16), BackgroundTransparency = 1,
         Text = "JOIN THE DISCORD SERVER", Font = Enum.Font.GothamBold,
@@ -1064,7 +1063,6 @@ local function showKeyPrompt()
         Text = "Copy the invite link, paste it in your browser, and join.",
         Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.muted,
         TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 13}, s1)
-
     local invBtn = new("TextButton", {Size = UDim2.new(1, -32, 0, 42),
         Position = UDim2.fromOffset(16, 62), BackgroundColor3 = Theme.accent,
         Text = "🔗  COPY DISCORD INVITE", Font = Enum.Font.GothamBold, TextSize = 13,
@@ -1080,7 +1078,6 @@ local function showKeyPrompt()
     corner(s2, 14)
     local s2Stroke = stroke(s2, Theme.strokeSoft, 1.2, 0.4)
     grad(s2, Color3.fromRGB(24, 34, 58), Theme.panel, 90)
-
     local s2Tag = new("Frame", {Size = UDim2.fromOffset(28, 28),
         Position = UDim2.fromOffset(16, 16), BackgroundColor3 = Theme.accent,
         BorderSizePixel = 0, ZIndex = 13}, s2)
@@ -1088,7 +1085,6 @@ local function showKeyPrompt()
     local s2TagLbl = new("TextLabel", {Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1, Text = "2", Font = Enum.Font.GothamBlack,
         TextSize = 13, TextColor3 = Color3.new(1,1,1), ZIndex = 14}, s2Tag)
-
     new("TextLabel", {Size = UDim2.new(1, -60, 0, 18),
         Position = UDim2.fromOffset(52, 16), BackgroundTransparency = 1,
         Text = "AUTHORIZE THE APP", Font = Enum.Font.GothamBold,
@@ -1099,7 +1095,6 @@ local function showKeyPrompt()
         Text = "Copy the link, open it, and click Authorize.",
         Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.muted,
         TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 13}, s2)
-
     local authBtn = new("TextButton", {Size = UDim2.new(1, -32, 0, 42),
         Position = UDim2.fromOffset(16, 62), BackgroundColor3 = Theme.accent,
         Text = "🔐  COPY AUTH LINK", Font = Enum.Font.GothamBold, TextSize = 13,
@@ -1125,7 +1120,6 @@ local function showKeyPrompt()
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Center,
         TextWrapped = true, ZIndex = 13}, statusWrap)
-
     local function setStatus(msg, col, dcol)
         statusLbl2.Text = msg
         statusLbl2.TextColor3 = col or Theme.muted
@@ -1165,35 +1159,23 @@ local function showKeyPrompt()
             {Size = UDim2.new(0.5, 0, 1, 0)}):Play()
     end
 
-    invBtn.MouseEnter:Connect(function()
-        Tween:Create(invStroke, TweenInfo.new(0.15), {Transparency = 0}):Play()
-    end)
-    invBtn.MouseLeave:Connect(function()
-        Tween:Create(invStroke, TweenInfo.new(0.15), {Transparency = 0.3}):Play()
-    end)
-
+    invBtn.MouseEnter:Connect(function() Tween:Create(invStroke, TweenInfo.new(0.15), {Transparency = 0}):Play() end)
+    invBtn.MouseLeave:Connect(function() Tween:Create(invStroke, TweenInfo.new(0.15), {Transparency = 0.3}):Play() end)
     invBtn.MouseButton1Click:Connect(function()
         copyToClipboard(DISCORD_INVITE)
         tryOpenBrowser(DISCORD_INVITE)
         markStep1()
-        setStatus("Invite copied! Paste it in your browser to join.",
-            Theme.accent2, Theme.accent2)
+        setStatus("Invite copied! Paste it in your browser to join.", Theme.accent2, Theme.accent2)
     end)
 
-    authBtn.MouseEnter:Connect(function()
-        Tween:Create(authStroke, TweenInfo.new(0.15), {Transparency = 0}):Play()
-    end)
-    authBtn.MouseLeave:Connect(function()
-        Tween:Create(authStroke, TweenInfo.new(0.15), {Transparency = 0.3}):Play()
-    end)
+    authBtn.MouseEnter:Connect(function() Tween:Create(authStroke, TweenInfo.new(0.15), {Transparency = 0}):Play() end)
+    authBtn.MouseLeave:Connect(function() Tween:Create(authStroke, TweenInfo.new(0.15), {Transparency = 0.3}):Play() end)
 
     local function pollLoop()
         while polling do
             task.wait(2)
             if not polling or not sessionId then break end
-            local resp = postJSON("/oauth/poll", {
-                session = sessionId, robloxId = tostring(LP.UserId),
-            })
+            local resp = postJSON("/oauth/poll", {session = sessionId, robloxId = tostring(LP.UserId)})
             if not resp then
                 setStatus("Network hiccup — retrying…", Theme.danger, Theme.danger)
             elseif resp.status == "ok" and resp.key then
@@ -1219,6 +1201,9 @@ local function showKeyPrompt()
                     username = resp.username or "user",
                     displayName = resp.displayName or resp.username or "Verified",
                     avatar = resp.avatar or "",
+                    discordId = resp.discordId or "",
+                    rank = resp.rank or nil,
+                    badgeUrl = resp.badgeUrl or nil,
                 }
                 return
             elseif resp.status == "pending" then
@@ -1270,6 +1255,9 @@ local function verifySession()
                 username = resp.username or "user",
                 displayName = resp.displayName or resp.username or "Verified",
                 avatar = resp.avatar or "",
+                discordId = resp.discordId or "",
+                rank = resp.rank or nil,
+                badgeUrl = resp.badgeUrl or nil,
             }
         end
         return nil
@@ -1289,10 +1277,7 @@ local function verifySession()
 
     if SESSION_KEY then
         local user = tryCheck(SESSION_KEY)
-        if user then
-            saveStoredKey(SESSION_KEY)
-            return user
-        end
+        if user then saveStoredKey(SESSION_KEY); return user end
         SESSION_KEY = nil
     end
 
@@ -1309,11 +1294,23 @@ MY_USER = verifiedUser
 MY_USER.country = "Unknown"
 MY_USER.countryCode = ""
 MY_USER.connectedAt = tick()
+MY_USER.userId = LP.UserId
 
 fetchCountry(function(name, code)
     MY_USER.country = name or "Unknown"
     MY_USER.countryCode = code or ""
 end)
+
+-- Now that we have the key, register with the server relay
+if Net.up then
+    Net.send("register", {key = SESSION_KEY or ""})
+    task.spawn(function()
+        while true do
+            task.wait(10)
+            Net.send("heartbeat")
+        end
+    end)
+end
 
 showVerifiedScreen(verifiedUser)
 
@@ -1341,17 +1338,14 @@ end
 
 function makeResizable(frame, opts)
     opts = opts or {}
-    local minW = opts.minW or 300
-    local minH = opts.minH or 200
+    local minW, minH = opts.minW or 300, opts.minH or 200
     local corners_ = opts.corners or {"br", "tr", "bl", "tl"}
     local gs = opts.gripSize or 14
     local baseZ = (frame.ZIndex or 1) + 500
     frame.ClipsDescendants = true
     for _, c in ipairs(corners_) do
-        local grip = new("Frame", {
-            Name = "Resize_"..c, Size = UDim2.fromOffset(gs, gs),
-            BackgroundTransparency = 1, ZIndex = baseZ, Active = true,
-        }, frame)
+        local grip = new("Frame", {Name = "Resize_"..c, Size = UDim2.fromOffset(gs, gs),
+            BackgroundTransparency = 1, ZIndex = baseZ, Active = true}, frame)
         if c == "br" then grip.Position = UDim2.new(1, -gs, 1, -gs)
         elseif c == "tr" then grip.Position = UDim2.new(1, -gs, 0, 0)
         elseif c == "bl" then grip.Position = UDim2.new(0, 0, 1, -gs)
@@ -1364,8 +1358,7 @@ function makeResizable(frame, opts)
                 sSize = Vector2.new(frame.AbsoluteSize.X, frame.AbsoluteSize.Y)
             end
         end
-        grip.InputBegan:Connect(begin)
-        hot.InputBegan:Connect(begin)
+        grip.InputBegan:Connect(begin); hot.InputBegan:Connect(begin)
         UIS.InputChanged:Connect(function(i)
             if not dragging then return end
             if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
@@ -1386,7 +1379,9 @@ function makeResizable(frame, opts)
             end
         end)
     end
-end--==================== ESP colour logic ====================
+end
+
+--==================== ESP colour logic ====================
 function isAlly(p)
     if p == LP then return true end
     if LP.Team and p.Team then return LP.Team == p.Team end
@@ -1537,8 +1532,6 @@ function ripple(parent, x, y, col, sz, dur)
     t1:Play(); t2:Play()
     t1.Completed:Connect(function() r:Destroy() end)
 end
-
--- FIXED pulse: caches base size once per instance so rapid clicks don't grow it
 function pulse(inst, sc, dur)
     if not Cfg.UI.Juicy then return end
     if not inst or not inst.Parent then return end
@@ -1556,7 +1549,6 @@ function pulse(inst, sc, dur)
         end
     end)
 end
-
 function flash(inst, col, dur)
     if not Cfg.UI.Juicy then return end
     local base = inst:GetAttribute("FlashBase")
@@ -1646,6 +1638,97 @@ function notify(title, msg, col, dur)
         Tween:Create(st, TweenInfo.new(0.35), {Transparency = 1}):Play()
         t.Completed:Connect(function() card:Destroy() end)
     end)
+end
+
+--==================== ANNOUNCEMENTS ====================
+function showAnnouncement(data)
+    if not annStack or not annStack.Parent then return end
+    local rank  = data.rank or "owner"
+    local style = BADGE_STYLE[rank] or BADGE_STYLE.owner
+    local col   = style.color
+
+    local card = new("Frame", {Size = UDim2.new(1, 0, 0, 0),
+        BackgroundColor3 = Theme.bg, BackgroundTransparency = 0.05,
+        BorderSizePixel = 0, ZIndex = 3, ClipsDescendants = true,
+        AutomaticSize = Enum.AutomaticSize.Y}, annStack)
+    corner(card, 14)
+    local st = stroke(card, col, 2, 0.15)
+    grad(card, Theme.panel2, Theme.bg, 90)
+    dropShadow(card, 14, 14, 0.6)
+
+    local strip = new("Frame", {Size = UDim2.new(1, 0, 0, 3),
+        BackgroundColor3 = col, BorderSizePixel = 0, ZIndex = 4}, card)
+    corner(strip, 2)
+
+    local iconPlate = new("Frame", {Size = UDim2.fromOffset(38, 38),
+        Position = UDim2.fromOffset(14, 14), BackgroundColor3 = col,
+        BackgroundTransparency = 0.85, BorderSizePixel = 0, ZIndex = 4}, card)
+    corner(iconPlate, 19)
+    stroke(iconPlate, col, 1.5, 0.2)
+    new("TextLabel", {Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1, Text = style.emoji, Font = Enum.Font.GothamBlack,
+        TextSize = 20, TextColor3 = col, ZIndex = 5}, iconPlate)
+
+    new("TextLabel", {Size = UDim2.new(1, -80, 0, 20),
+        Position = UDim2.fromOffset(62, 12), BackgroundTransparency = 1,
+        Text = string.upper(style.label) .. " ANNOUNCEMENT",
+        Font = Enum.Font.GothamBlack, TextSize = 11, TextColor3 = col,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5}, card)
+
+    new("TextLabel", {Size = UDim2.new(1, -80, 0, 14),
+        Position = UDim2.fromOffset(62, 30), BackgroundTransparency = 1,
+        Text = "from "..data.sender, Font = Enum.Font.Gotham, TextSize = 10,
+        TextColor3 = Theme.muted, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5}, card)
+
+    local body = new("TextLabel", {Size = UDim2.new(1, -32, 0, 0),
+        Position = UDim2.fromOffset(16, 62), BackgroundTransparency = 1,
+        Text = data.text, Font = Enum.Font.GothamBold, TextSize = 13,
+        TextColor3 = Theme.text, TextWrapped = true,
+        AutomaticSize = Enum.AutomaticSize.Y,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 5}, card)
+    new("UIPadding", {PaddingBottom = UDim.new(0, 16)}, body)
+
+    card.Position = UDim2.new(0, 0, 0, -140)
+    Tween:Create(card, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+        {Position = UDim2.new(0, 0, 0, 0)}):Play()
+
+    task.spawn(function()
+        while card.Parent do
+            Tween:Create(iconPlate, TweenInfo.new(0.9, Enum.EasingStyle.Sine),
+                {BackgroundTransparency = 0.6}):Play()
+            task.wait(0.9)
+            if not card.Parent then return end
+            Tween:Create(iconPlate, TweenInfo.new(0.9, Enum.EasingStyle.Sine),
+                {BackgroundTransparency = 0.85}):Play()
+            task.wait(0.9)
+        end
+    end)
+
+    local dur = math.clamp(6 + #data.text * 0.045, 6, 16)
+    task.delay(dur, function()
+        if not card or not card.Parent then return end
+        local t = Tween:Create(card, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
+            {Position = UDim2.new(0, 0, 0, -160), BackgroundTransparency = 1})
+        t:Play()
+        Tween:Create(st, TweenInfo.new(0.4), {Transparency = 1}):Play()
+        t.Completed:Connect(function() card:Destroy() end)
+    end)
+end
+
+function sendAnnouncement(text)
+    if not isMod() then
+        notify("Denied", "You are not an owner/mod", Theme.danger, 2)
+        return false
+    end
+    text = tostring(text or ""):gsub("^%s+",""):gsub("%s+$","")
+    if text == "" then return false end
+    if not Net.up then
+        notify("No relay", "Announcements need the server relay", Theme.danger, 3)
+        return false
+    end
+    Net.send("announce", {text = text, key = SESSION_KEY or ""})
+    return true
 end
 
 --==================== SAVE ====================
@@ -1746,20 +1829,6 @@ function deleteLoadout(name)
         if IO.has then pcall(IO.write, autoloadFile(), "") end
     end
 end
-function renameLoadout(old, new)
-    if old == new then return false end
-    local t = saveTable()
-    if not t[old] or t[new] then return false end
-    t[new] = t[old]
-    t[old] = nil
-    writeSave(t)
-    if autoloadName == old then
-        autoloadName = new
-        _G.__ReaperAutoload = new
-        if IO.has then pcall(IO.write, autoloadFile(), new) end
-    end
-    return true
-end
 if IO.has then
     pcall(function()
         local ok, e = pcall(IO.isfile, globalAutoloadFile())
@@ -1783,6 +1852,16 @@ local pg = LP:WaitForChild("PlayerGui")
 gui = new("ScreenGui", {Name = "ReaperUI", ResetOnSpawn = false,
     IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 9999}, pg)
 initNotifs(pg)
+
+-- Announcement layer
+annGui = new("ScreenGui", {Name = "ReaperAnnounce", ResetOnSpawn = false,
+    IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 10001}, pg)
+annStack = new("Frame", {Size = UDim2.new(0, 560, 0, 0),
+    Position = UDim2.new(0.5, -280, 0, 60), BackgroundTransparency = 1,
+    AutomaticSize = Enum.AutomaticSize.Y}, annGui)
+new("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder,
+    HorizontalAlignment = Enum.HorizontalAlignment.Center,
+    VerticalAlignment = Enum.VerticalAlignment.Top}, annStack)
 
 --==================== CROSSHAIR ====================
 crossGui = new("ScreenGui", {Name = "ReaperCross", ResetOnSpawn = false,
@@ -1837,25 +1916,17 @@ function runAction(id)
         end
     elseif id == "spectate" then
         if RA.spectateTarget == t then
-            RA.spectateTarget = nil
-            RA.spectateZoom = 1
+            RA.spectateTarget = nil; RA.spectateZoom = 1
             notify("Spectate off", "", Theme.muted, 1.5)
         else
-            RA.spectateTarget = t
-            RA.spectateZoom = 1
+            RA.spectateTarget = t; RA.spectateZoom = 1
             notify("Spectating", t.Name.." · scroll to zoom", Theme.accent3, 3)
         end
     elseif id == "hump" then
         TS.target = t
-        if not Cfg.Troll.Hump and widgets["Troll.Hump"] then
-            widgets["Troll.Hump"].set(true)
-        end
-        HUMP.phase = 0
-        HUMP.smoothVel = 0
-        HUMP.smoothAir = 0
-        HUMP.lockTimer = 1.5
-        HUMP.awaitingRespawn = false
-        HUMP.fallHold = 0
+        if not Cfg.Troll.Hump and widgets["Troll.Hump"] then widgets["Troll.Hump"].set(true) end
+        HUMP.phase = 0; HUMP.smoothVel = 0; HUMP.smoothAir = 0
+        HUMP.lockTimer = 1.5; HUMP.awaitingRespawn = false; HUMP.fallHold = 0
         notify("Humping", t.Name, Theme.gold)
     end
 end
@@ -1881,9 +1952,7 @@ function rebuildChips()
             corner(chip, 4)
             new("UIPadding", {PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, chip)
             local cs = stroke(chip, a.col, 1, 0.35)
-            chip.MouseButton1Click:Connect(function()
-                runAction(a.id); pulse(chip, 1.1, 0.08)
-            end)
+            chip.MouseButton1Click:Connect(function() runAction(a.id); pulse(chip, 1.1, 0.08) end)
             chip.MouseEnter:Connect(function()
                 Tween:Create(chip, TweenInfo.new(0.12), {BackgroundTransparency = 0}):Play()
                 cs.Transparency = 0
@@ -1897,9 +1966,7 @@ function rebuildChips()
 end
 do
     local u = unboundKeys(3)
-    RA.keys.teleport = u[1]
-    RA.keys.spectate = u[2]
-    RA.keys.hump = u[3]
+    RA.keys.teleport = u[1]; RA.keys.spectate = u[2]; RA.keys.hump = u[3]
 end
 
 --==================== CROSSHAIR / RETICLE loop ====================
@@ -2214,8 +2281,7 @@ function buildRain()
             NumberSequenceKeypoint.new(0.55, 0.7),
             NumberSequenceKeypoint.new(1, 0.05),
         }), Rotation = 90}, trail)
-        rainTrails[#rainTrails+1] = {inst = holder,
-            speed = Theme.rain.speed * (0.7 + math.random()*0.7)}
+        rainTrails[#rainTrails+1] = {inst = holder, speed = Theme.rain.speed * (0.7 + math.random()*0.7)}
     end
 end
 buildRain()
@@ -2249,7 +2315,7 @@ function buildSakura()
 end
 buildSakura()
 
---==================== HEADER ====================
+--==================== HEADER (with badge) ====================
 header = tPanel2(new("Frame", {Size = UDim2.new(1, 0, 0, 62),
     BackgroundColor3 = Theme.panel2, BorderSizePixel = 0, ZIndex = 31}, menu))
 corner(header, 16)
@@ -2257,10 +2323,17 @@ grad(header, Color3.fromRGB(34, 72, 128), Color3.fromRGB(7, 11, 24), 90)
 new("Frame", {Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 1, -2),
     BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 32}, header)
 
-tAcc2(new("TextLabel", {Size = UDim2.fromOffset(150, 62), Position = UDim2.fromOffset(16, 0),
+tAcc2(new("TextLabel", {Size = UDim2.fromOffset(120, 62), Position = UDim2.fromOffset(16, 0),
     BackgroundTransparency = 1, Text = "REAPER", Font = Enum.Font.GothamBlack,
     TextSize = 19, TextColor3 = Theme.accent2, TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Center, ZIndex = 32}, header))
+
+-- Badge next to title
+local _badgeLbl = new("TextLabel", {Size = UDim2.new(0, 130, 0, 22),
+    Position = UDim2.fromOffset(128, 20), BackgroundTransparency = 1,
+    Text = "", Font = Enum.Font.GothamBlack, TextSize = 12,
+    TextColor3 = Theme.gold, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Center, ZIndex = 32}, header)
 
 local _avSize = 42
 local _avWrap = new("Frame", {Size = UDim2.fromOffset(_avSize, _avSize),
@@ -2314,6 +2387,16 @@ task.spawn(function()
             local ss = math.floor(elapsed % 60)
             _metaLbl.Text = string.format("%s %s   ⏱ %02d:%02d:%02d",
                 flag, (MY_USER.country ~= "" and MY_USER.country) or "—", hh, mm, ss)
+
+            -- Update badge
+            local rank = MY_USER.rank
+            local b = rank and BADGE_STYLE[rank]
+            if b then
+                _badgeLbl.Text = b.emoji.." "..b.label
+                _badgeLbl.TextColor3 = b.color
+            else
+                _badgeLbl.Text = ""
+            end
         end
         task.wait(0.5)
     end
@@ -2848,8 +2931,7 @@ function applyOpacity(op)
         local anc, skip = d.Parent, false
         while anc and anc ~= menu do
             if anc == snowLayer or anc == rainLayer or anc == ambient or anc == bgGlow or anc == sakuraLayer then
-                skip = true
-                break
+                skip = true; break
             end
             anc = anc.Parent
         end
@@ -3036,22 +3118,17 @@ refreshAD = function()
     if not want then return end
     local t = TS.target
     if HUMP.awaitingRespawn then
-        adRows.Status.Text = "WAITING RESPAWN"
-        adRows.Status.TextColor3 = Theme.gold
+        adRows.Status.Text = "WAITING RESPAWN"; adRows.Status.TextColor3 = Theme.gold
     elseif HUMP.fallHold > 0 then
-        adRows.Status.Text = "HOLDING AIR"
-        adRows.Status.TextColor3 = Theme.danger
+        adRows.Status.Text = "HOLDING AIR"; adRows.Status.TextColor3 = Theme.danger
     else
-        adRows.Status.Text = "ACTIVE"
-        adRows.Status.TextColor3 = Theme.success
+        adRows.Status.Text = "ACTIVE"; adRows.Status.TextColor3 = Theme.success
     end
     adRows.Target.Text = t and t.Name or "—"
-
     local baseSpeed = Cfg.Troll.HumpSpeed
     local mult = Cfg.Troll.HumpAutoDetect and HUMP.speedMult or 1
     local effSpeed = math.clamp(baseSpeed * mult, 0.5, 200)
     local effAmp = math.clamp(Cfg.Troll.HumpAmp * (Cfg.Troll.HumpAutoDetect and HUMP.ampMult or 1), 0.1, 8)
-
     adRows.BaseSpeed.Text = string.format("%.1f Hz", baseSpeed)
     adRows.SpeedMult.Text = Cfg.Troll.HumpAutoDetect and string.format("×%.2f", HUMP.speedMult) or "×1.00"
     adRows.EffSpeed.Text = string.format("%.1f Hz", effSpeed)
@@ -3071,6 +3148,10 @@ tabTitles = {
     world = "WORLD", players = "PLAYERS", troll = "TROLL", util = "UTIL",
     save = "SAVE", theme = "THEME",
 }
+if isMod() then
+    table.insert(tabOrder, 2, "owner")
+    tabTitles.owner = "👑 OWNER"
+end
 for _, id in ipairs(tabOrder) do makeTab(id, tabTitles[id]) end
 
 --====================== HOME ======================
@@ -3145,8 +3226,7 @@ do
         local avWrap = new("Frame", {Size = UDim2.fromOffset(32, 32),
             Position = UDim2.fromOffset(0, 2), BackgroundTransparency = 1, ZIndex = 36}, row)
         local avImg = new("ImageLabel", {Size = UDim2.fromScale(1, 1),
-            BackgroundColor3 = Theme.panel2, BorderSizePixel = 0, Image = "",
-            ZIndex = 36}, avWrap)
+            BackgroundColor3 = Theme.panel2, BorderSizePixel = 0, Image = "", ZIndex = 36}, avWrap)
         corner(avImg, 16)
         local avLetter = new("TextLabel", {Size = UDim2.fromScale(1, 1),
             BackgroundTransparency = 1, Text = (e.sender or "?"):sub(1,1):upper(),
@@ -3155,7 +3235,13 @@ do
         local avBorder = new("Frame", {Size = UDim2.fromScale(1, 1),
             BackgroundTransparency = 1, ZIndex = 38}, avWrap)
         corner(avBorder, 16)
-        stroke(avBorder, e.col or Theme.accent, 1.4, 0.15)
+
+        -- Badge ring color: if the sender is owner/mod, ring is their badge color
+        local senderRank, senderBadgeUrl
+        if e.userId then senderRank, senderBadgeUrl = getRankFor(e.userId) end
+        local ringCol = e.col or Theme.accent
+        if senderRank and BADGE_STYLE[senderRank] then ringCol = BADGE_STYLE[senderRank].color end
+        stroke(avBorder, ringCol, senderRank and 2 or 1.4, 0.15)
 
         if e.avatar and e.avatar ~= "" then
             task.spawn(function()
@@ -3171,9 +3257,18 @@ do
         local textHolder = new("Frame", {Size = UDim2.new(1, -40, 0, 0),
             Position = UDim2.fromOffset(40, 0), BackgroundTransparency = 1,
             AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 36}, row)
+
+        -- Build badge prefix
+        local badgePrefix = ""
+        if senderRank and BADGE_STYLE[senderRank] then
+            local b = BADGE_STYLE[senderRank]
+            badgePrefix = string.format('<font color="#%s">%s %s</font>  ', b.color:ToHex(), b.emoji, b.label)
+        end
+
         local flag = flagEmoji(e.countryCode)
-        local headTxt = string.format('<font color="#8FA6BE">%s</font>  <font color="#%s"><b>%s</b></font>  <font color="#8FA6BE">%s</font>',
+        local headTxt = string.format('<font color="#8FA6BE">%s</font>  %s<font color="#%s"><b>%s</b></font>  <font color="#8FA6BE">%s</font>',
             os.date("%H:%M", math.floor(e.time or tick())),
+            badgePrefix,
             (e.col or Color3.fromRGB(148, 204, 255)):ToHex(),
             (e.discordName and e.discordName ~= "" and ("@"..e.discordName)) or e.sender,
             flag .. (e.country and e.country ~= "" and ("  "..e.country) or ""))
@@ -3233,15 +3328,12 @@ do
     fbSend.MouseButton1Click:Connect(function()
         local txt = fbInput.Text or ""
         if txt:gsub("%s", "") == "" then
-            notify("Feedback", "Nothing to send", Theme.danger, 2)
-            return
+            notify("Feedback", "Nothing to send", Theme.danger, 2); return
         end
         if #txt > 500 then txt = txt:sub(1, 500) end
         local payload = game:GetService("HttpService"):JSONEncode({
-            text = txt,
-            name = LP.Name,
-            userId = tostring(LP.UserId),
-            placeId = tostring(game.PlaceId),
+            text = txt, name = LP.Name,
+            userId = tostring(LP.UserId), placeId = tostring(game.PlaceId),
         })
         if Net.up then
             Net.send("feedback", {text = txt})
@@ -3259,6 +3351,103 @@ do
         pulse(fbSend, 0.94, 0.06)
         glow(fbSend, Theme.accent2, 0.4)
     end)
+end
+
+--====================== OWNER (staff-only) ======================
+if isMod() then
+    local pg2 = "owner"
+    section(pg2, "LIVE ANNOUNCEMENTS", "📢")
+
+    new("TextLabel", {Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1,
+        Text = "Broadcast a message to every REAPER user in this server.",
+        Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.muted,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
+
+    local annBox = tPanel2(new("TextBox", {Size = UDim2.new(1, 0, 0, 80),
+        BackgroundColor3 = Theme.panel2, BackgroundTransparency = 0.15,
+        BorderSizePixel = 0, Text = "",
+        PlaceholderText = "type your announcement…",
+        PlaceholderColor3 = Theme.muted, Font = Enum.Font.Gotham,
+        TextSize = 12, TextColor3 = Theme.text, MultiLine = true,
+        ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2]))
+    corner(annBox, 8)
+    tStroke(stroke(annBox, Theme.strokeSoft, 1))
+    new("UIPadding", {PaddingTop = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10),
+        PaddingRight = UDim.new(0, 10), PaddingBottom = UDim.new(0, 8)}, annBox)
+
+    buttonRow(pg2, "Send to everyone", "📢 SEND", function(b)
+        local txt = annBox.Text or ""
+        if sendAnnouncement(txt) then
+            annBox.Text = ""
+            notify("Announcement sent", "Broadcast to all users", Theme.success, 3)
+        end
+    end)
+
+    buttonRow(pg2, "Preview locally", "PREVIEW", function()
+        local txt = annBox.Text or ""
+        if txt:gsub("%s","") == "" then
+            notify("Preview", "Type a message first", Theme.gold, 2); return
+        end
+        showAnnouncement({
+            text = txt, sender = LP.Name,
+            userId = LP.UserId, rank = getLocalRank() or "owner",
+            time = os.time(),
+        })
+    end)
+
+    section(pg2, "ONLINE OWNERS / MODS", "🛡️")
+    local staffList = new("Frame", {Size = UDim2.new(1, 0, 0, 0),
+        BackgroundTransparency = 1, LayoutOrder = #pages[pg2]:GetChildren(),
+        AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 33}, pages[pg2])
+    new("UIListLayout", {Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder}, staffList)
+
+    local function refreshStaff()
+        for _, c in ipairs(staffList:GetChildren()) do
+            if not c:IsA("UIListLayout") then c:Destroy() end
+        end
+        local found = 0
+        for _, p in ipairs(Players:GetPlayers()) do
+            local rank = getRankFor(p.UserId)
+            local b = rank and BADGE_STYLE[rank]
+            if b then
+                found = found + 1
+                local row = tPanel(new("Frame", {Size = UDim2.new(1, 0, 0, 28),
+                    BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.15,
+                    LayoutOrder = found, ZIndex = 34}, staffList))
+                corner(row, 6)
+                stroke(row, b.color, 1.4, 0.2)
+                new("TextLabel", {Size = UDim2.new(1, -10, 1, 0),
+                    Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
+                    Text = string.format("%s %s  %s", b.emoji, b.label, p.Name),
+                    Font = Enum.Font.GothamBold, TextSize = 11,
+                    TextColor3 = b.color, TextXAlignment = Enum.TextXAlignment.Left,
+                    ZIndex = 35}, row)
+            end
+        end
+        if found == 0 then
+            new("TextLabel", {Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1,
+                Text = "no staff online", Font = Enum.Font.Gotham, TextSize = 10,
+                TextColor3 = Theme.muted, TextXAlignment = Enum.TextXAlignment.Left,
+                LayoutOrder = 1, ZIndex = 34}, staffList)
+        end
+    end
+    refreshStaff()
+    buttonRow(pg2, "Refresh staff list", "REFRESH", refreshStaff)
+    Players.PlayerAdded:Connect(function() task.wait(0.5) refreshStaff() end)
+    Players.PlayerRemoving:Connect(function() task.wait(0.5) refreshStaff() end)
+
+    section(pg2, "MY IDENTITY", "🪪")
+    local myInfo = infoRow(pg2, "")
+    local function refreshMyInfo()
+        local rank = getLocalRank() or "user"
+        local dId = MY_USER and MY_USER.discordId or "—"
+        myInfo.Text = string.format("discord: %s  ·  rank: %s", tostring(dId), rank)
+    end
+    refreshMyInfo()
+    buttonRow(pg2, "Refresh identity", "REFRESH", refreshMyInfo)
 end
 
 --====================== COMBAT ======================
@@ -3281,8 +3470,7 @@ do
         local idx = 1
         for i, p in ipairs(parts) do if p == Cfg.Aimbot.TargetPart then idx = i end end
         idx = idx % #parts + 1
-        Cfg.Aimbot.TargetPart = parts[idx]
-        b.Text = parts[idx]
+        Cfg.Aimbot.TargetPart = parts[idx]; b.Text = parts[idx]
     end)
     toggleRow(pg2, "Aimbot.TeamCheck", "Team Check")
     toggleRow(pg2, "Aimbot.VisibleOnly", "Visible Only")
@@ -3311,8 +3499,7 @@ do
     buttonRow(pg2, "Rebind Action Keys", "REDETECT", function()
         local u = unboundKeys(3)
         RA.keys.teleport, RA.keys.spectate, RA.keys.hump = u[1], u[2], u[3]
-        rebuildChips()
-        refreshActions()
+        rebuildChips(); refreshActions()
         notify("Rebound", "action keys updated", Theme.accent)
     end)
 end
@@ -3404,13 +3591,22 @@ do
         end
         for _, p in ipairs(Players:GetPlayers()) do
             if p ~= LP then
+                local rank = getRankFor(p.UserId)
+                local b = rank and BADGE_STYLE[rank]
                 local row = tPanel(new("Frame", {Size = UDim2.new(1, 0, 0, 32),
                     BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.15, ZIndex = 33}, cont))
                 corner(row, 7)
-                tStroke(stroke(row, Theme.strokeSoft, 1, 0.55))
+                if b then
+                    stroke(row, b.color, 1.6, 0.1)
+                else
+                    stroke(row, Theme.strokeSoft, 1, 0.55)
+                end
                 hoverStripe(row, Theme.accent)
-                new("TextLabel", {Text = p.Name.." "..roleLabel(p), Font = Enum.Font.GothamBold,
-                    TextSize = 12, TextColor3 = espColour(p), BackgroundTransparency = 1,
+                local nameTxt = p.Name.." "..roleLabel(p)
+                if b then nameTxt = b.emoji.." "..nameTxt end
+                new("TextLabel", {Text = nameTxt, Font = Enum.Font.GothamBold,
+                    TextSize = 12, TextColor3 = b and b.color or espColour(p),
+                    BackgroundTransparency = 1,
                     Position = UDim2.fromOffset(14, 0), Size = UDim2.new(0.55, 0, 1, 0),
                     TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 34}, row)
                 local fb = new("TextButton", {Text = "FLING", Font = Enum.Font.GothamBold,
@@ -3464,8 +3660,7 @@ do
     corner(clearB, 6)
     tStroke(stroke(clearB, Theme.strokeSoft, 1))
     clearB.MouseButton1Click:Connect(function()
-        TS.target = nil
-        lbl.Text = "Target: Nearest"
+        TS.target = nil; lbl.Text = "Target: Nearest"
     end)
     toggleRow(pg2, "Troll.TapTarget", "Tap to Target")
     sliderRow(pg2, "Troll.TapRadius", "Crosshair Radius", 5, 200, 0)
@@ -3480,6 +3675,8 @@ do
         for i, p in ipairs(Players:GetPlayers()) do
             if p ~= LP then
                 local cur = (TS.target == p)
+                local rank = getRankFor(p.UserId)
+                local b = rank and BADGE_STYLE[rank]
                 local row = tPanel(new("Frame", {Size = UDim2.new(1, 0, 0, 28),
                     BackgroundColor3 = cur and Theme.panel2 or Theme.panel,
                     BackgroundTransparency = cur and 0 or 0.15,
@@ -3487,10 +3684,12 @@ do
                 corner(row, 7)
                 tStroke(stroke(row, cur and Theme.success or Theme.strokeSoft,
                     cur and 1.4 or 1, cur and 0 or 0.55))
+                local txt = (cur and "● " or "○ ")..p.Name
+                if b then txt = b.emoji.." "..txt end
                 new("TextLabel", {Size = UDim2.new(1, -80, 1, 0), Position = UDim2.fromOffset(14, 0),
-                    BackgroundTransparency = 1, Text = (cur and "● " or "○ ")..p.Name,
+                    BackgroundTransparency = 1, Text = txt,
                     Font = Enum.Font.GothamBold, TextSize = 11,
-                    TextColor3 = cur and Theme.success or espColour(p),
+                    TextColor3 = cur and Theme.success or (b and b.color or espColour(p)),
                     TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 34}, row)
                 local sb = new("TextButton", {Size = UDim2.fromOffset(60, 20),
                     Position = UDim2.new(1, -68, 0.5, -10),
@@ -3504,16 +3703,10 @@ do
                 sb.MouseButton1Click:Connect(function()
                     TS.target = p
                     lbl.Text = "Target: "..p.Name
-                    HUMP.phase = 0
-                    HUMP.smoothVel = 0
-                    HUMP.smoothAir = 0
-                    HUMP.lockTimer = 1.0
-                    HUMP.awaitingRespawn = false
-                    HUMP.fallHold = 0
-                    HUMP.lastGoodCF = nil
-                    HUMP.speedMult = 1.0
-                    HUMP.ampMult = 1.0
-                    HUMP.distMult = 1.0
+                    HUMP.phase = 0; HUMP.smoothVel = 0; HUMP.smoothAir = 0
+                    HUMP.lockTimer = 1.0; HUMP.awaitingRespawn = false
+                    HUMP.fallHold = 0; HUMP.lastGoodCF = nil
+                    HUMP.speedMult = 1.0; HUMP.ampMult = 1.0; HUMP.distMult = 1.0
                     rebuild()
                 end)
             end
@@ -3528,7 +3721,7 @@ do
 
     local hb = collapsible(pg2, "HUMP ENGINE", true)
     toggleRow(hb, "Troll.Hump", "HUMP Target")
-    toggleRow(hb, "Troll.HumpAutoDetect", "Auto-Detect Adaptive (scales your slider)")
+    toggleRow(hb, "Troll.HumpAutoDetect", "Auto-Detect (scales your slider)")
     toggleRow(hb, "Troll.HumpFallProtect", "Fall / Respawn Protection")
     toggleRow(hb, "UI.AD", "Show Auto-Detect HUD (J)")
     sliderRow(hb, "Troll.HumpSpeed", "Hump Speed (Hz)", 1, 100, 0)
@@ -3618,40 +3811,31 @@ do
             local btn = new("TextButton", {Size = UDim2.new(1, 0, 1, 0),
                 BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 36}, row)
             btn.MouseButton1Click:Connect(function()
-                selected = n
-                nameBox.Text = n
-                refreshList()
+                selected = n; nameBox.Text = n; refreshList()
             end)
         end
     end
     buttonRow(pg2, "Save", "SAVE", function()
         local n = nameBox.Text ~= "" and nameBox.Text or "default"
-        saveLoadout(n, false)
-        selected = n
-        refreshList()
+        saveLoadout(n, false); selected = n; refreshList()
         notify("Saved", n, Theme.success)
     end)
     buttonRow(pg2, "Save + Autoload", "SAVE+", function()
         local n = nameBox.Text ~= "" and nameBox.Text or "default"
-        saveLoadout(n, true)
-        selected = n
-        refreshList()
+        saveLoadout(n, true); selected = n; refreshList()
         autoLbl.Text = "★ autoload: "..n
         notify("Autoload set", n, Theme.success)
     end)
     buttonRow(pg2, "Load", "LOAD", function()
         local n = nameBox.Text ~= "" and nameBox.Text or selected
         if not n or not loadLoadout(n) then
-            notify("Not found", "", Theme.danger)
-            return
+            notify("Not found", "", Theme.danger); return
         end
         for p, w in pairs(widgets) do
             local v = getPath(Cfg, p)
             if v ~= nil then pcall(w.set, v, false) end
         end
-        applyTheme()
-        applyOpacity(Cfg.UI.MenuOpacity or 0)
-        refreshList()
+        applyTheme(); applyOpacity(Cfg.UI.MenuOpacity or 0); refreshList()
         notify("Loaded", n, Theme.success)
     end)
     buttonRow(pg2, "Delete", "DELETE", function()
@@ -3672,35 +3856,22 @@ do
     section(pg2, "PALETTE", "🌸")
     local palLbl = infoRow(pg2, "Current: Winter")
     buttonRow(pg2, "Winter", "APPLY", function()
-        Theme.setPalette("Winter")
-        Cfg.UI.Sakura = false
+        Theme.setPalette("Winter"); Cfg.UI.Sakura = false
         if widgets["UI.Sakura"] then widgets["UI.Sakura"].set(false, false) end
-        applyTheme()
-        buildSakura()
-        palLbl.Text = "Current: Winter"
+        applyTheme(); buildSakura(); palLbl.Text = "Current: Winter"
     end)
     buttonRow(pg2, "Sakura", "APPLY", function()
-        Theme.setPalette("Sakura")
-        Cfg.UI.Sakura = true
+        Theme.setPalette("Sakura"); Cfg.UI.Sakura = true
         if widgets["UI.Sakura"] then widgets["UI.Sakura"].set(true, false) end
-        applyTheme()
-        buildSakura()
-        palLbl.Text = "Current: Sakura"
+        applyTheme(); buildSakura(); palLbl.Text = "Current: Sakura"
     end)
     toggleRow(pg2, "UI.Sakura", "Sakura Leaves", function(on)
-        if on then
-            Theme.setPalette("Sakura")
-            palLbl.Text = "Current: Sakura"
-        else
-            Theme.setPalette("Winter")
-            palLbl.Text = "Current: Winter"
-        end
-        applyTheme()
-        buildSakura()
+        if on then Theme.setPalette("Sakura"); palLbl.Text = "Current: Sakura"
+        else Theme.setPalette("Winter"); palLbl.Text = "Current: Winter" end
+        applyTheme(); buildSakura()
     end)
     sliderRow(pg2, "UI.SakuraLeaves", "Leaf Count", 10, 400, 0, function(v)
-        Theme.sakura.leaves.count = v
-        buildSakura()
+        Theme.sakura.leaves.count = v; buildSakura()
     end)
     sliderRow(pg2, "UI.SakuraSpeed", "Leaf Speed", 5, 80, 0, function(v)
         Theme.sakura.leaves.speed = v
@@ -3800,14 +3971,10 @@ UIS.InputBegan:Connect(function(i, gpe)
             return
         end
         if Cfg.UI.HUDKey and i.KeyCode == Cfg.UI.HUDKey then
-            Cfg.UI.HUD = not Cfg.UI.HUD
-            pcall(refreshHUD)
-            return
+            Cfg.UI.HUD = not Cfg.UI.HUD; pcall(refreshHUD); return
         end
         if Cfg.UI.ADKey and i.KeyCode == Cfg.UI.ADKey then
-            Cfg.UI.AD = not Cfg.UI.AD
-            pcall(refreshAD)
-            return
+            Cfg.UI.AD = not Cfg.UI.AD; pcall(refreshAD); return
         end
         if RA.keys.teleport and i.KeyCode == RA.keys.teleport then runAction("teleport"); return end
         if RA.keys.spectate and i.KeyCode == RA.keys.spectate then runAction("spectate"); return end
@@ -3822,15 +3989,9 @@ UIS.InputBegan:Connect(function(i, gpe)
         local p = TS.hovered
         if p then
             TS.target = p
-            HUMP.phase = 0
-            HUMP.smoothVel = 0
-            HUMP.smoothAir = 0
-            HUMP.lockTimer = 1.0
-            HUMP.awaitingRespawn = false
-            HUMP.fallHold = 0
-            HUMP.speedMult = 1.0
-            HUMP.ampMult = 1.0
-            HUMP.distMult = 1.0
+            HUMP.phase = 0; HUMP.smoothVel = 0; HUMP.smoothAir = 0
+            HUMP.lockTimer = 1.0; HUMP.awaitingRespawn = false
+            HUMP.fallHold = 0; HUMP.speedMult = 1.0; HUMP.ampMult = 1.0; HUMP.distMult = 1.0
             notify("Locked on", p.Name, Theme.success, 2.5)
         end
         return
@@ -3923,9 +4084,7 @@ RS.RenderStepped:Connect(function(dt)
     pcall(function()
         local showFov = Cfg.Aimbot.Enabled and Cfg.Aimbot.ShowCircle
         if fovCircle.Visible ~= showFov then fovCircle.Visible = showFov end
-        if showFov then
-            fovCircle.Size = UDim2.fromOffset(Cfg.Aimbot.FOV * 2, Cfg.Aimbot.FOV * 2)
-        end
+        if showFov then fovCircle.Size = UDim2.fromOffset(Cfg.Aimbot.FOV * 2, Cfg.Aimbot.FOV * 2) end
         if not Cfg.Aimbot.Enabled then aiming = false; aimToggled = false; return end
         if Cfg.Aimbot.ToggleMode then aiming = aimToggled
         else aiming = bindDown(Cfg.Aimbot.Key) end
@@ -4077,6 +4236,16 @@ RS.Heartbeat:Connect(function()
                         roleL = roleLabel(p)
                     end
 
+                    -- Owner / mod priority override
+                    local rank = getRankFor(p.UserId)
+                    local badge = rank and BADGE_STYLE[rank]
+                    local nameTagPrefix = ""
+                    if badge then
+                        base = badge.color
+                        outline = Color3.new(base.R * 1.2, base.G * 1.2, base.B * 1.2)
+                        nameTagPrefix = badge.emoji.." "
+                    end
+
                     local d = espData[p]
                     if not d or not d.hl or d.hl.Adornee ~= ch then
                         removeESP(p)
@@ -4097,7 +4266,7 @@ RS.Heartbeat:Connect(function()
                             Size = UDim2.new(1, 0, 0, 18), Font = Enum.Font.GothamBold,
                             TextSize = 13, TextColor3 = outline,
                             TextStrokeTransparency = 0.2, TextStrokeColor3 = Color3.new(0,0,0),
-                            Text = p.Name, Visible = Cfg.Visuals.NameTags, Parent = bb})
+                            Text = nameTagPrefix..p.Name, Visible = Cfg.Visuals.NameTags, Parent = bb})
                         local dl = new("TextLabel", {BackgroundTransparency = 1,
                             Position = UDim2.new(0, 0, 0, 18), Size = UDim2.new(1, 0, 0, 14),
                             Font = Enum.Font.Gotham, TextSize = 11,
@@ -4110,7 +4279,8 @@ RS.Heartbeat:Connect(function()
                             TextColor3 = base, TextStrokeTransparency = 0.3,
                             TextStrokeColor3 = Color3.new(0,0,0),
                             Text = "", Visible = Cfg.Visuals.ShowRole, Parent = bb})
-                        espData[p] = {hl = hl, bb = bb, nameLbl = nl, distLbl = dl, roleLbl = rl}
+                        espData[p] = {hl = hl, bb = bb, nameLbl = nl, distLbl = dl, roleLbl = rl,
+                            badge = badge}
                         d = espData[p]
                     end
                     if d.hl then
@@ -4121,6 +4291,7 @@ RS.Heartbeat:Connect(function()
                     if d.nameLbl then
                         d.nameLbl.Visible = Cfg.Visuals.NameTags
                         d.nameLbl.TextColor3 = outline
+                        d.nameLbl.Text = nameTagPrefix..p.Name
                     end
                     if d.distLbl then
                         d.distLbl.Visible = Cfg.Visuals.Distance
@@ -4130,9 +4301,13 @@ RS.Heartbeat:Connect(function()
                         end
                     end
                     if d.roleLbl then
-                        d.roleLbl.Visible = Cfg.Visuals.ShowRole and roleL ~= ""
+                        local roleText = roleL
+                        if badge then
+                            roleText = string.format("%s %s", badge.emoji, badge.label)
+                        end
+                        d.roleLbl.Visible = Cfg.Visuals.ShowRole and roleText ~= ""
                         if d.roleLbl.Visible then
-                            d.roleLbl.Text = roleL
+                            d.roleLbl.Text = roleText
                             d.roleLbl.TextColor3 = base
                         end
                     end
@@ -4273,8 +4448,7 @@ RS.Heartbeat:Connect(function(dt)
             local humpActive = Cfg.Troll.Hump and TS.target ~= nil
             local flySuppress = humpActive and Cfg.Troll.HumpOverrideFly
             if Cfg.Movement.Fly and r and h and not Cfg.Movement.Freecam and not flySuppress then
-                startFly()
-                wasFlying = true
+                startFly(); wasFlying = true
                 local dir = Vector3.zero
                 if UIS:IsKeyDown(Enum.KeyCode.W) then dir = dir + Cam.CFrame.LookVector end
                 if UIS:IsKeyDown(Enum.KeyCode.S) then dir = dir - Cam.CFrame.LookVector end
@@ -4291,8 +4465,7 @@ RS.Heartbeat:Connect(function(dt)
                 if flyBV then flyBV.Velocity = flySmoothedVel end
                 if flyGyro then flyGyro.CFrame = CFrame.new(r.Position, r.Position + Cam.CFrame.LookVector) end
             elseif wasFlying and not Cfg.Movement.Fly then
-                stopFly()
-                wasFlying = false
+                stopFly(); wasFlying = false
             end
             if Cfg.Movement.Sprint and not Cfg.Movement.SpeedEnabled and h then
                 if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then h.WalkSpeed = Cfg.Movement.SprintSpeed
@@ -4313,13 +4486,9 @@ RS.Heartbeat:Connect(function(dt)
             Lighting.Ambient = Color3.fromRGB(180, 180, 180)
             Lighting.OutdoorAmbient = Color3.fromRGB(180, 180, 180)
             Lighting.Brightness = 3
-            Lighting.FogEnd = 1e6
-            Lighting.FogStart = 1e6
+            Lighting.FogEnd = 1e6; Lighting.FogStart = 1e6
         end
-        if Cfg.Visuals.NoFog then
-            Lighting.FogEnd = 1e6
-            Lighting.FogStart = 1e6
-        end
+        if Cfg.Visuals.NoFog then Lighting.FogEnd = 1e6; Lighting.FogStart = 1e6 end
         if Cfg.World.RemoveBlur then
             local b = Lighting:FindFirstChildOfClass("BlurEffect")
             if b and b ~= _G.__ReaperBlur and b.Name ~= "ReaperPromptBlur" then b.Enabled = false end
@@ -4402,23 +4571,18 @@ function flingPlayer(p)
     local spin = Instance.new("Part")
     spin.Name = "ReaperFling"
     spin.Size = Vector3.new(3, 3, 3)
-    spin.Transparency = 1
-    spin.CanCollide = false
-    spin.Massless = true
-    spin.CFrame = r.CFrame
-    spin.Parent = workspace
+    spin.Transparency = 1; spin.CanCollide = false; spin.Massless = true
+    spin.CFrame = r.CFrame; spin.Parent = workspace
     local w = Instance.new("WeldConstraint")
     w.Part0, w.Part1, w.Parent = spin, r, spin
     local av = Instance.new("BodyAngularVelocity")
     av.AngularVelocity = Vector3.new(1e5, 1e5, 1e5)
     av.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-    av.P = 1e9
-    av.Parent = spin
+    av.P = 1e9; av.Parent = spin
     local bv = Instance.new("BodyVelocity")
     bv.Velocity = Vector3.new(math.random(-40, 40), 400, math.random(-40, 40))
     bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-    bv.P = 1e6
-    bv.Parent = spin
+    bv.P = 1e6; bv.Parent = spin
     task.wait(Cfg.Utility.FlingDur)
     if spin.Parent then spin:Destroy() end
     flinging = false
@@ -4448,7 +4612,7 @@ function getTargetPlayer()
     return best
 end
 
--- Auto-tuner: writes ONLY multipliers. Slider is always the base.
+-- Adaptive tuner: writes multipliers only.
 RS.Heartbeat:Connect(function(dt)
     pcall(function()
         if not Cfg.Troll.HumpAutoDetect then return end
@@ -4480,13 +4644,8 @@ RS.Heartbeat:Connect(function(dt)
         local rawTier = tierFor(sm)
         if rawTier ~= HR.tier then
             HUMP.lockTimer = HUMP.lockTimer + dt
-            if HUMP.lockTimer > 0.35 then
-                HR.tier = rawTier
-                HUMP.lockTimer = 0
-            end
-        else
-            HUMP.lockTimer = 0
-        end
+            if HUMP.lockTimer > 0.35 then HR.tier = rawTier; HUMP.lockTimer = 0 end
+        else HUMP.lockTimer = 0 end
 
         local targetSpeedMult, targetAmpMult, targetDistMult
         if HR.tier == "STILL" then
@@ -4538,7 +4697,7 @@ RS.Heartbeat:Connect(function(dt)
             end
         end
 
-        --===== HUMP ENGINE (v3) — multipliers, fall protect, respawn hold =====
+        --===== HUMP ENGINE =====
         if Cfg.Troll.Hump then
             local t = TS.target or getTargetPlayer()
             if t then
@@ -4548,14 +4707,12 @@ RS.Heartbeat:Connect(function(dt)
                     local mH = mC:FindFirstChildOfClass("Humanoid")
                     if not (mR and mH) then return end
 
-                    -- respawn hold
                     if HUMP.awaitingRespawn then
                         if t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
                             local newH = t.Character:FindFirstChildOfClass("Humanoid")
                             if newH and newH.Health > 0 then
                                 HUMP.awaitingRespawn = false
-                                HUMP.fallHold = 0
-                                HUMP.phase = 0
+                                HUMP.fallHold = 0; HUMP.phase = 0
                                 HUMP.lastGoodCF = nil
                                 notify("Target respawned", t.Name, Theme.success, 2)
                             end
@@ -4584,7 +4741,6 @@ RS.Heartbeat:Connect(function(dt)
                         return
                     end
 
-                    -- falling under map
                     local tY = tR.Position.Y
                     local tVelY = tR.AssemblyLinearVelocity.Y
                     local isFalling = (tY < -40) or (tVelY < -75)
@@ -4611,11 +4767,8 @@ RS.Heartbeat:Connect(function(dt)
                     end
                     HR.fallingUnder = false
 
-                    if tY > -20 then
-                        HUMP.lastGoodCF = mR.CFrame
-                    end
+                    if tY > -20 then HUMP.lastGoodCF = mR.CFrame end
 
-                    -- core hump
                     if Cfg.Troll.HumpKeepOwner then
                         pcall(function() mR:SetNetworkOwner(LP) end)
                     end
@@ -4625,7 +4778,6 @@ RS.Heartbeat:Connect(function(dt)
                         if mH.PlatformStand then mH.PlatformStand = false end
                     end
 
-                    -- Slider is ALWAYS the base. Auto-Detect only multiplies it.
                     local sm_ = Cfg.Troll.HumpAutoDetect and HUMP.speedMult or 1
                     local am_ = Cfg.Troll.HumpAutoDetect and HUMP.ampMult   or 1
                     local dm_ = Cfg.Troll.HumpAutoDetect and HUMP.distMult  or 1
@@ -4633,7 +4785,6 @@ RS.Heartbeat:Connect(function(dt)
                     local useAmp   = math.clamp(Cfg.Troll.HumpAmp   * am_, 0.1, 8)
                     local useDist  = math.clamp(Cfg.Troll.HumpDist  * dm_, 0.5, 8)
 
-                    -- accumulate phase (no tick() reset), wrap to prevent precision loss
                     HUMP.phase = HUMP.phase + dt * useSpeed
                     if HUMP.phase > math.pi * 2000 then HUMP.phase = HUMP.phase % (math.pi * 2) end
 
@@ -4653,16 +4804,12 @@ RS.Heartbeat:Connect(function(dt)
                         cf = CFrame.lookAt(want, want + look, Vector3.new(0, 1, 0))
                     end
 
-                    -- frame-rate independent smoothing
                     local posAlpha = 1 - math.exp(-25 * dt)
                     mR.CFrame = mR.CFrame:Lerp(cf, posAlpha)
                     mR.AssemblyAngularVelocity = Vector3.zero
 
-                    if Cfg.Troll.HumpVelMatch then
-                        mR.AssemblyLinearVelocity = vel
-                    else
-                        mR.AssemblyLinearVelocity = Vector3.zero
-                    end
+                    if Cfg.Troll.HumpVelMatch then mR.AssemblyLinearVelocity = vel
+                    else mR.AssemblyLinearVelocity = Vector3.zero end
 
                     if Cfg.Movement.Noclip then noclipChar(mC) end
                     TS.humpWasActive = true
@@ -4688,11 +4835,8 @@ RS.Heartbeat:Connect(function(dt)
                 pcall(function() h:ChangeState(Enum.HumanoidStateType.GettingUp) end)
             end
             TS.humpWasActive = false
-            HUMP.phase = 0
-            HUMP.smoothVel = 0
-            HUMP.smoothAir = 0
-            HUMP.awaitingRespawn = false
-            HUMP.fallHold = 0
+            HUMP.phase = 0; HUMP.smoothVel = 0; HUMP.smoothAir = 0
+            HUMP.awaitingRespawn = false; HUMP.fallHold = 0
             HR.fallingUnder = false
         end
 
