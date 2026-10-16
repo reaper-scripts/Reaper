@@ -1,96 +1,49 @@
 -- REAPER — universal cheat suite. @d9vq on discord.
--- Client is fully self-sufficient — no server relay needed.
-
 local RS0 = game:GetService("RunService")
 
---==================== OPTIONAL SERVER HALF ====================
+--==================== OPTIONAL SERVER RELAY ====================
 if RS0:IsServer() then
     local Players = game:GetService("Players")
     local RS = game:GetService("ReplicatedStorage")
-    local HttpService = game:GetService("HttpService")
-    local KEY_API = "https://proud-hill-8cf1.bigphatnigur.workers.dev"
-
     local remote = RS:FindFirstChild("ReaperComm")
     if not remote then
         remote = Instance.new("RemoteEvent")
         remote.Name = "ReaperComm"
         remote.Parent = RS
     end
-
     local users = {}
-    local TIMEOUT = 30
-
     local function list()
         local t = {}
         for p in pairs(users) do if p.Parent then t[#t+1] = p.Name end end
         table.sort(t); return t
     end
-    local function bcast(channel, ...)
+    local function bcast(ch, ...)
         local a = {...}
         local n = select("#", ...)
         for p in pairs(users) do
-            if p.Parent then
-                pcall(function() remote:FireClient(p, channel, table.unpack(a, 1, n)) end)
-            end
+            if p.Parent then pcall(function() remote:FireClient(p, ch, table.unpack(a, 1, n)) end) end
         end
     end
-    local function fetchRankMap()
-        local ids = {}
-        for _, p in ipairs(Players:GetPlayers()) do ids[#ids+1] = tostring(p.UserId) end
-        if #ids == 0 then return {} end
-        local ok, res = pcall(function()
-            return HttpService:PostAsync(KEY_API .. "/lookup",
-                HttpService:JSONEncode({robloxIds = ids}),
-                Enum.HttpContentType.ApplicationJson)
-        end)
-        if not ok or not res then return {} end
-        local okD, data = pcall(function() return HttpService:JSONDecode(res) end)
-        if not okD or type(data) ~= "table" then return {} end
-        return data.users or {}
-    end
-    local function scheduleBroadcastRanks()
-        task.delay(0.6, function() bcast("rankMap", fetchRankMap()) end)
-    end
-
-    remote.OnServerEvent:Connect(function(plr, channel, payload)
+    remote.OnServerEvent:Connect(function(plr, ch)
         if not plr or not plr.Parent then return end
-        if channel == "register" then
-            users[plr] = {lastSeen = tick()}
-            bcast("userCount", #list(), list())
-            scheduleBroadcastRanks()
-        elseif channel == "heartbeat" then
-            if users[plr] then users[plr].lastSeen = tick() end
-        elseif channel == "unregister" then
-            users[plr] = nil
-            bcast("userCount", #list(), list())
-        end
+        if ch == "register" then users[plr] = {lastSeen = tick()}; bcast("userCount", #list(), list())
+        elseif ch == "heartbeat" then if users[plr] then users[plr].lastSeen = tick() end end
     end)
-
-    Players.PlayerRemoving:Connect(function(p)
-        users[p] = nil
-        bcast("userCount", #list(), list())
-        scheduleBroadcastRanks()
-    end)
-    Players.PlayerAdded:Connect(function(p)
-        task.delay(1, function() scheduleBroadcastRanks() end)
-    end)
-
+    Players.PlayerRemoving:Connect(function(p) users[p] = nil; bcast("userCount", #list(), list()) end)
     task.spawn(function()
-        while true do task.wait(5); local now = tick()
+        while true do
+            task.wait(5)
+            local now = tick()
             for p, d in pairs(users) do
-                if now - d.lastSeen > TIMEOUT or not p.Parent then users[p] = nil end
+                if now - d.lastSeen > 30 or not p.Parent then users[p] = nil end
             end
         end
     end)
-    task.spawn(function()
-        while true do task.wait(45); scheduleBroadcastRanks() end
-    end)
-
     print("[REAPER SERVER] optional relay up")
     return
 end
 
---==================== CLIENT HALF ====================
+--==================== CLIENT ====================
 if _G.__REAPER_ACTIVE then
     pcall(function()
         local pg = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
@@ -110,9 +63,7 @@ local RS = game:GetService("RunService")
 local Tween = game:GetService("TweenService")
 local Lighting = game:GetService("Lighting")
 local Teleport = game:GetService("TeleportService")
-local Stats = game:GetService("Stats")
 local VirtualUser = game:GetService("VirtualUser")
-local TCS = game:GetService("TextChatService")
 local RS2 = game:GetService("ReplicatedStorage")
 local PhysicsService = game:GetService("PhysicsService")
 local TextService = game:GetService("TextService")
@@ -120,6 +71,7 @@ local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local Cam = workspace.CurrentCamera
 
+--==================== FILE IO DETECTION ====================
 IO = {has = false, reason = "none"}
 do
     local function check(env)
@@ -127,7 +79,7 @@ do
         local ok1, w = pcall(function() return env.writefile end)
         local ok2, r = pcall(function() return env.readfile end)
         local ok3, i = pcall(function() return env.isfile end)
-        if ok1 and ok2 and ok3 and type(w)=="function" and type(r)=="function" and type(i)=="function" then
+        if ok1 and ok2 and ok3 and type(w) == "function" and type(r) == "function" and type(i) == "function" then
             return w, r, i
         end
     end
@@ -147,11 +99,11 @@ do
         end
     end
 end
-print("[REAPER] IO: "..tostring(IO.has).." ("..IO.reason..")")
+print("[REAPER] IO: " .. tostring(IO.has) .. " (" .. IO.reason .. ")")
 
 --==================== HTTP HELPERS ====================
 KEY_API = "https://proud-hill-8cf1.bigphatnigur.workers.dev"
-FEEDBACK_WEBHOOK = "https://proud-hill-8cf1.bigphatnigur.workers.dev/feedback"
+FEEDBACK_WEBHOOK = KEY_API .. "/feedback"
 DISCORD_INVITE = "https://discord.gg/AkNuT3Bxyn"
 
 function httpGet(url)
@@ -172,17 +124,20 @@ end
 function httpPost(url, body)
     if not url or url == "" then return false, "no url" end
     local req = (syn and syn.request) or (http and http.request) or http_request or request
-    if not req then return false, "no http api available in executor" end
-    local headers = { ["Content-Type"] = "application/json" }
-    local ok, res = pcall(req, {Url = url, Method = "POST", Headers = headers, Body = body})
-    if not ok then return false, "request failed: "..tostring(res) end
+    if not req then return false, "no http api available" end
+    local ok, res = pcall(req, {
+        Url = url, Method = "POST",
+        Headers = {["Content-Type"] = "application/json"},
+        Body = body,
+    })
+    if not ok then return false, "request failed: " .. tostring(res) end
     local status, respBody
     if type(res) == "table" then
         status = res.StatusCode or res.Status or res.status
         respBody = res.Body or res.body or res.Data
     end
     if status and tonumber(status) and tonumber(status) >= 400 then
-        return false, "HTTP "..tostring(status)..": "..tostring(respBody or "")
+        return false, "HTTP " .. tostring(status) .. ": " .. tostring(respBody or "")
     end
     return true, res
 end
@@ -191,26 +146,36 @@ function postJSON(path, tbl)
     local body = HttpService:JSONEncode(tbl)
     local ok, res = httpPost(KEY_API .. path, body)
     if not ok then return nil, tostring(res) end
-    local respBody = nil
-    if type(res) == "table" then
-        respBody = res.Body or res.body or res.Data
-    else
-        respBody = res
-    end
+    local respBody = type(res) == "table" and (res.Body or res.body or res.Data) or res
     local okD, decoded = pcall(function() return HttpService:JSONDecode(respBody) end)
     if okD then return decoded end
     return nil, "bad response"
 end
 
+-- Human-readable error text from an HTTP failure
+function parseErrorReason(res)
+    local r = tostring(res)
+    local jsonPart = r:match("({.*})")
+    if jsonPart then
+        local ok, d = pcall(function() return HttpService:JSONDecode(jsonPart) end)
+        if ok and type(d) == "table" then
+            if d.error then
+                if d.reason then return tostring(d.error) .. " · " .. tostring(d.reason) end
+                if d.until  then return tostring(d.error) .. " · until " .. tostring(d.until) end
+                return tostring(d.error)
+            end
+        end
+    end
+    return r
+end
+
 --==================== OWNER / MOD ====================
 MY_USER = nil
 RemoteRanks = {}
-
 BADGE_STYLE = {
-    owner = {label = "OWNER", emoji = "👑", color = Color3.fromRGB(255, 214, 106)},
-    mod   = {label = "MOD",   emoji = "🛡️", color = Color3.fromRGB(160, 120, 255)},
+    owner = {label = "OWNER", emoji = "👑", color = Color3.fromRGB(200, 120, 255)},
+    mod   = {label = "MOD",   emoji = "🛡️", color = Color3.fromRGB(160, 220, 255)},
 }
-
 function getLocalRank() return MY_USER and MY_USER.rank or nil end
 function getRankFor(userId)
     userId = tonumber(userId) or userId
@@ -224,7 +189,7 @@ end
 function isMod() return getLocalRank() ~= nil end
 function isOwner() return getLocalRank() == "owner" end
 
---==================== COUNTRY + AVATAR ====================
+--==================== COUNTRY / AVATAR ====================
 function flagEmoji(code)
     if not code or #code ~= 2 then return "🌍" end
     code = code:upper()
@@ -232,24 +197,12 @@ function flagEmoji(code)
     if a < 0 or a > 25 or b < 0 or b > 25 then return "🌍" end
     return utf8.char(0x1F1E6 + a) .. utf8.char(0x1F1E6 + b)
 end
-
 function fetchCountry(cb)
     task.spawn(function()
         local ok, body = httpGet("http://ip-api.com/json/?fields=status,country,countryCode")
         if ok and body then
-            local okD, data = pcall(function() return HttpService:JSONDecode(body) end)
-            if okD and type(data) == "table" and data.country then
-                cb(data.country, data.countryCode or "")
-                return
-            end
-        end
-        ok, body = httpGet("https://ipapi.co/json/")
-        if ok and body then
-            local okD, data = pcall(function() return HttpService:JSONDecode(body) end)
-            if okD and type(data) == "table" and data.country_name then
-                cb(data.country_name, data.country_code or "")
-                return
-            end
+            local okD, d = pcall(function() return HttpService:JSONDecode(body) end)
+            if okD and type(d) == "table" and d.country then cb(d.country, d.countryCode or ""); return end
         end
         cb("Unknown", "")
     end)
@@ -286,44 +239,46 @@ function getChatAvatarAsset(url)
     return nil
 end
 
---==================== THEME ====================
+--==================== THEME (neon purple / black) ====================
 Theme = {
-    bg        = Color3.fromRGB(4, 3, 9),
-    bgDeep    = Color3.fromRGB(2, 1, 5),
-    panel     = Color3.fromRGB(14, 10, 24),
-    panel2    = Color3.fromRGB(26, 18, 44),
-    panel3    = Color3.fromRGB(46, 30, 72),
-    stroke    = Color3.fromRGB(130, 70, 210),
-    strokeSoft= Color3.fromRGB(80, 42, 130),
-    accent    = Color3.fromRGB(160, 90, 255),
-    accent2   = Color3.fromRGB(215, 175, 255),
-    accent3   = Color3.fromRGB(230, 110, 255),
-    text      = Color3.fromRGB(240, 235, 250),
-    muted     = Color3.fromRGB(150, 130, 180),
-    success   = Color3.fromRGB(120, 240, 170),
-    danger    = Color3.fromRGB(255, 100, 130),
+    bg        = Color3.fromRGB(3, 2, 8),
+    bgDeep    = Color3.fromRGB(1, 1, 4),
+    panel     = Color3.fromRGB(12, 8, 22),
+    panel2    = Color3.fromRGB(22, 14, 40),
+    panel3    = Color3.fromRGB(42, 24, 72),
+    stroke    = Color3.fromRGB(150, 80, 255),
+    strokeSoft= Color3.fromRGB(80, 40, 140),
+    accent    = Color3.fromRGB(170, 90, 255),
+    accent2   = Color3.fromRGB(220, 180, 255),
+    accent3   = Color3.fromRGB(240, 110, 255),
+    text      = Color3.fromRGB(240, 235, 255),
+    muted     = Color3.fromRGB(155, 130, 195),
+    success   = Color3.fromRGB(120, 245, 175),
+    danger    = Color3.fromRGB(255, 105, 140),
     gold      = Color3.fromRGB(255, 220, 130),
+    neon      = Color3.fromRGB(200, 100, 255),
+    neonDark  = Color3.fromRGB(60, 20, 120),
     ticker    = "REAPER · universal cheat suite  ·  @d9vq on discord!",
-    tickerColor  = Color3.fromRGB(180, 130, 255),
-    tickerAccent = Color3.fromRGB(240, 130, 255),
+    tickerColor  = Color3.fromRGB(200, 130, 255),
+    tickerAccent = Color3.fromRGB(240, 120, 255),
     sakura = {active = false, leaves = {count = 80, speed = 22, sway = 1.4, size = 5}},
     snow = {count = 60, speed = 25, size = 2},
     rain = {count = 28, speed = 90, thickness = 2},
 }
 local WINTER = {
-    bg = Color3.fromRGB(4, 3, 9),
-    panel = Color3.fromRGB(14, 10, 24),
-    panel2 = Color3.fromRGB(26, 18, 44),
-    panel3 = Color3.fromRGB(46, 30, 72),
-    stroke = Color3.fromRGB(130, 70, 210),
-    strokeSoft = Color3.fromRGB(80, 42, 130),
-    accent = Color3.fromRGB(160, 90, 255),
-    accent2 = Color3.fromRGB(215, 175, 255),
-    accent3 = Color3.fromRGB(230, 110, 255),
-    text = Color3.fromRGB(240, 235, 250),
-    muted = Color3.fromRGB(150, 130, 180),
-    tickerColor = Color3.fromRGB(180, 130, 255),
-    tickerAccent = Color3.fromRGB(240, 130, 255),
+    bg = Color3.fromRGB(3, 2, 8),
+    panel = Color3.fromRGB(12, 8, 22),
+    panel2 = Color3.fromRGB(22, 14, 40),
+    panel3 = Color3.fromRGB(42, 24, 72),
+    stroke = Color3.fromRGB(150, 80, 255),
+    strokeSoft = Color3.fromRGB(80, 40, 140),
+    accent = Color3.fromRGB(170, 90, 255),
+    accent2 = Color3.fromRGB(220, 180, 255),
+    accent3 = Color3.fromRGB(240, 110, 255),
+    text = Color3.fromRGB(240, 235, 255),
+    muted = Color3.fromRGB(155, 130, 195),
+    tickerColor = Color3.fromRGB(200, 130, 255),
+    tickerAccent = Color3.fromRGB(240, 120, 255),
 }
 local SAKURA = {
     bg = Color3.fromRGB(18, 6, 20),
@@ -347,11 +302,11 @@ function Theme.setPalette(which)
 end
 
 ESPColours = {
-    ally = Color3.fromRGB(70, 150, 255), enemy = Color3.fromRGB(255, 78, 96),
-    police = Color3.fromRGB(70, 150, 255), criminal = Color3.fromRGB(226, 46, 46),
-    prisoner = Color3.fromRGB(255, 156, 62), sheriff = Color3.fromRGB(70, 150, 255),
-    murderer = Color3.fromRGB(226, 46, 46), innocent = Color3.fromRGB(96, 226, 126),
-    united = Color3.fromRGB(56, 138, 255), iron = Color3.fromRGB(226, 46, 46),
+    ally = Color3.fromRGB(90, 160, 255), enemy = Color3.fromRGB(255, 80, 110),
+    police = Color3.fromRGB(90, 160, 255), criminal = Color3.fromRGB(230, 46, 46),
+    prisoner = Color3.fromRGB(255, 156, 62), sheriff = Color3.fromRGB(90, 160, 255),
+    murderer = Color3.fromRGB(230, 46, 46), innocent = Color3.fromRGB(96, 226, 126),
+    united = Color3.fromRGB(56, 138, 255), iron = Color3.fromRGB(230, 46, 46),
 }
 
 --==================== STATE ====================
@@ -375,7 +330,7 @@ PREFERRED_KEYS = {
 --==================== CHAT ====================
 Chat = {messages = {}, listeners = {}, max = 400}
 chatSeenIds = {}
-function addChat(sender, text, isLocal, col, avatar, discordName, country, countryCode, userId, msgId, placeId, timeMs)
+function addChat(sender, text, isLocal, col, avatar, discordName, country, countryCode, userId, msgId, placeId, timeMs, discordId)
     if msgId then
         if chatSeenIds[msgId] then return end
         chatSeenIds[msgId] = true
@@ -387,7 +342,7 @@ function addChat(sender, text, isLocal, col, avatar, discordName, country, count
         time = timeMs and (timeMs / 1000) or tick(),
         avatar = avatar, discordName = discordName,
         country = country, countryCode = countryCode, userId = userId,
-        msgId = msgId, placeId = placeId,
+        msgId = msgId, placeId = placeId, discordId = discordId,
     }
     Chat.messages[#Chat.messages+1] = e
     if #Chat.messages > Chat.max then table.remove(Chat.messages, 1) end
@@ -404,14 +359,13 @@ function sendChat(text)
     end
     task.spawn(function()
         local body = HttpService:JSONEncode({
-            robloxId = tostring(LP.UserId),
-            key = SESSION_KEY,
-            text = text,
-            placeId = tostring(game.PlaceId),
+            robloxId = tostring(LP.UserId), key = SESSION_KEY,
+            text = text, placeId = tostring(game.PlaceId),
         })
         local ok, res = httpPost(KEY_API .. "/chat/send", body)
         if not ok then
-            notify("Chat failed", tostring(res), Theme.danger, 5, tostring(res))
+            local pretty = parseErrorReason(res)
+            notify("Chat failed", pretty, Theme.danger, 8, pretty)
         end
     end)
     return true
@@ -476,13 +430,17 @@ function grad(i, c1, c2, rot)
     return new("UIGradient", {Color = ColorSequence.new(c1, c2), Rotation = rot or 90}, i)
 end
 function dropShadow(parent, radius, spread, transparency)
-    local sh = new("Frame", {Size = UDim2.new(1, spread or 12, 1, spread or 12),
+    local sh = new("Frame", {
+        Size = UDim2.new(1, spread or 12, 1, spread or 12),
         Position = UDim2.new(0.5, 0, 0.5, (spread or 12) / 4),
         AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Color3.new(0, 0, 0),
         BackgroundTransparency = transparency or 0.55,
-        BorderSizePixel = 0, ZIndex = (parent.ZIndex or 1) - 1}, parent.Parent)
-    corner(sh, radius or 18); return sh
+        BorderSizePixel = 0,
+        ZIndex = (parent.ZIndex or 1) - 1,
+    }, parent.Parent)
+    corner(sh, radius or 18)
+    return sh
 end
 function hum() local c = LP.Character; return c and c:FindFirstChildOfClass("Humanoid") end
 function hrp() local c = LP.Character; return c and c:FindFirstChild("HumanoidRootPart") end
@@ -520,6 +478,8 @@ function deepCopy(t)
     return o
 end--==================== KEY SYSTEM ====================
 SESSION_KEY = nil
+DETECTED_DISCORD_ID = nil  -- remembered between steps
+JOIN_CONFIRMED = false     -- true once /check-guild returns inGuild
 
 local function keyStorePath() return "Reaper_key_" .. tostring(game.PlaceId) .. ".txt" end
 local function loadStoredKey()
@@ -532,8 +492,12 @@ local function loadStoredKey()
     if c == "" then return nil end
     return c
 end
-local function saveStoredKey(k) if IO.has and k then pcall(IO.write, keyStorePath(), k) end end
-local function clearStoredKey() if IO.has then pcall(IO.write, keyStorePath(), "") end end
+local function saveStoredKey(k)
+    if IO.has and k then pcall(IO.write, keyStorePath(), k) end
+end
+local function clearStoredKey()
+    if IO.has then pcall(IO.write, keyStorePath(), "") end
+end
 
 local function copyToClipboard(url)
     if type(setclipboard) == "function" then return pcall(setclipboard, url) end
@@ -573,12 +537,12 @@ local function showVerifiedScreen(user)
         IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 20000}, pg)
 
     local backdrop = new("Frame", {Size = UDim2.fromScale(1, 1),
-        BackgroundColor3 = Color3.fromRGB(1, 2, 6), BackgroundTransparency = 0.18,
+        BackgroundColor3 = Color3.fromRGB(1, 1, 4), BackgroundTransparency = 0.15,
         BorderSizePixel = 0, ZIndex = 1}, sg)
 
     local bgDrift = new("Frame", {Size = UDim2.fromScale(1.4, 1.4),
         Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.96,
+        BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.95,
         BorderSizePixel = 0, ZIndex = 1}, backdrop)
     corner(bgDrift, 500)
     local bgDriftGrad = new("UIGradient", {
@@ -597,8 +561,8 @@ local function showVerifiedScreen(user)
             local sz = math.random(2, 4)
             local p = new("Frame", {Size = UDim2.fromOffset(sz, sz),
                 Position = UDim2.fromScale(math.random(), 1.05),
-                BackgroundColor3 = (math.random() > 0.5) and Theme.accent or Theme.accent3,
-                BackgroundTransparency = 0.45 + math.random() * 0.35,
+                BackgroundColor3 = (math.random() > 0.5) and Theme.neon or Theme.accent3,
+                BackgroundTransparency = 0.4 + math.random() * 0.35,
                 BorderSizePixel = 0, ZIndex = 2}, backdrop)
             corner(p, sz)
             local dur = 3.5 + math.random() * 3
@@ -612,22 +576,21 @@ local function showVerifiedScreen(user)
     local cardW, cardH = 430, 420
     local card = new("Frame", {Size = UDim2.fromOffset(cardW, cardH),
         Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 + 40),
-        BackgroundColor3 = Theme.bg, BorderSizePixel = 0, ZIndex = 10,
-        ClipsDescendants = false}, sg)
+        BackgroundColor3 = Theme.bg, BorderSizePixel = 0, ZIndex = 10}, sg)
     corner(card, 22)
-    grad(card, Color3.fromRGB(11, 15, 28), Color3.fromRGB(3, 5, 12), 90)
-    dropShadow(card, 22, 18, 0.55)
+    grad(card, Color3.fromRGB(14, 8, 28), Color3.fromRGB(2, 1, 6), 90)
+    dropShadow(card, 22, 18, 0.65)
 
     local borderGlow = new("Frame", {Size = UDim2.new(1, 16, 1, 16),
         Position = UDim2.new(0.5, 0, 0.5, 0), AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundColor3 = Theme.success, BackgroundTransparency = 0.5,
+        BackgroundColor3 = Theme.neon, BackgroundTransparency = 0.45,
         BorderSizePixel = 0, ZIndex = 9}, card)
     corner(borderGlow, 26)
     local borderGrad = new("UIGradient", {Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Theme.success),
-        ColorSequenceKeypoint.new(0.33, Theme.accent),
-        ColorSequenceKeypoint.new(0.66, Theme.accent3),
-        ColorSequenceKeypoint.new(1, Theme.success),
+        ColorSequenceKeypoint.new(0, Theme.neon),
+        ColorSequenceKeypoint.new(0.33, Theme.accent3),
+        ColorSequenceKeypoint.new(0.66, Theme.accent2),
+        ColorSequenceKeypoint.new(1, Theme.neon),
     })}, borderGlow)
     task.spawn(function()
         while borderGlow.Parent do
@@ -639,23 +602,24 @@ local function showVerifiedScreen(user)
         end
     end)
 
-    local avatarSize = 92
+    -- Redesigned avatar with neon ring pulse
+    local avatarSize = 96
     local avatarWrap = new("Frame", {Size = UDim2.fromOffset(avatarSize, avatarSize),
         Position = UDim2.new(0.5, 0, 0, 32), AnchorPoint = Vector2.new(0.5, 0),
         BackgroundTransparency = 1, ZIndex = 13}, card)
 
-    local avatarGlow = new("Frame", {Size = UDim2.fromScale(1, 1),
+    local ring1 = new("Frame", {Size = UDim2.fromScale(1, 1),
         Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundColor3 = Theme.success, BackgroundTransparency = 0.72,
+        BackgroundColor3 = Theme.neon, BackgroundTransparency = 0.65,
         BorderSizePixel = 0, ZIndex = 12}, avatarWrap)
-    corner(avatarGlow, avatarSize + 20)
-    local gT1 = Tween:Create(avatarGlow, TweenInfo.new(2.4, Enum.EasingStyle.Sine),
-        {Size = UDim2.fromOffset(avatarSize + 16, avatarSize + 16), BackgroundTransparency = 0.85})
-    local gT2 = Tween:Create(avatarGlow, TweenInfo.new(2.4, Enum.EasingStyle.Sine),
-        {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.72})
-    gT1.Completed:Connect(function() if avatarGlow.Parent then gT2:Play() end end)
-    gT2.Completed:Connect(function() if avatarGlow.Parent then gT1:Play() end end)
-    gT1:Play()
+    corner(ring1, avatarSize + 20)
+    local rt1 = Tween:Create(ring1, TweenInfo.new(2.4, Enum.EasingStyle.Sine),
+        {Size = UDim2.fromOffset(avatarSize + 20, avatarSize + 20), BackgroundTransparency = 0.9})
+    local rt2 = Tween:Create(ring1, TweenInfo.new(2.4, Enum.EasingStyle.Sine),
+        {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.65})
+    rt1.Completed:Connect(function() if ring1.Parent then rt2:Play() end end)
+    rt2.Completed:Connect(function() if ring1.Parent then rt1:Play() end end)
+    rt1:Play()
 
     local avatarHolder = new("Frame", {Size = UDim2.fromScale(1, 1),
         BackgroundColor3 = Theme.panel2, BorderSizePixel = 0,
@@ -677,7 +641,7 @@ local function showVerifiedScreen(user)
         local fb = new("Frame", {Size = UDim2.fromScale(1, 1),
             BackgroundColor3 = Theme.accent, BorderSizePixel = 0, ZIndex = 15}, avatarHolder)
         corner(fb, avatarSize / 2)
-        grad(fb, Theme.accent3, Theme.accent, 45)
+        grad(fb, Theme.accent3, Theme.neon, 45)
         new("TextLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
             Text = (user.displayName or user.username or "?"):sub(1, 1):upper(),
             Font = Enum.Font.GothamBlack, TextSize = 42,
@@ -687,7 +651,15 @@ local function showVerifiedScreen(user)
     local avatarBorder = new("Frame", {Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1, ZIndex = 16}, avatarHolder)
     corner(avatarBorder, avatarSize / 2)
-    stroke(avatarBorder, Theme.success, 2.4, 0.05)
+    local abStroke = stroke(avatarBorder, Theme.neon, 2.6, 0.1)
+    task.spawn(function()
+        while avatarBorder.Parent do
+            if abStroke and abStroke.Parent then
+                abStroke.Transparency = 0.1 + math.sin(tick() * 3) * 0.35
+            end
+            RS.RenderStepped:Wait()
+        end
+    end)
 
     local nameY = 32 + avatarSize + 14
     new("TextLabel", {Size = UDim2.new(1, -40, 0, 26),
@@ -701,36 +673,59 @@ local function showVerifiedScreen(user)
         Font = Enum.Font.Gotham, TextSize = 12,
         TextColor3 = Theme.muted, ZIndex = 12}, card)
 
-    local pillW = 120
-    local pill = new("Frame", {Size = UDim2.fromOffset(pillW, 20),
+    -- Badge pill
+    local pillW = 128
+    local pill = new("Frame", {Size = UDim2.fromOffset(pillW, 22),
         Position = UDim2.new(0.5, -pillW/2, 0, nameY + 48),
-        BackgroundColor3 = Theme.success, BackgroundTransparency = 0.85,
+        BackgroundColor3 = Theme.neon, BackgroundTransparency = 0.8,
         BorderSizePixel = 0, ZIndex = 12}, card)
-    corner(pill, 10)
-    tStroke(stroke(pill, Theme.success, 1.2, 0.25))
+    corner(pill, 11)
+    tStroke(stroke(pill, Theme.neon, 1.2, 0.15))
     local pillLbl = new("TextLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
-        Text = "● MEMBER VERIFIED", Font = Enum.Font.GothamBold, TextSize = 9,
-        TextColor3 = Theme.success, ZIndex = 13}, pill)
+        Text = "● MEMBER VERIFIED", Font = Enum.Font.GothamBold, TextSize = 10,
+        TextColor3 = Theme.neon, ZIndex = 13}, pill)
     if user.rank and BADGE_STYLE[user.rank] then
         local b = BADGE_STYLE[user.rank]
         pill.BackgroundColor3 = b.color
-        pillLbl.Text = b.emoji.." "..b.label
+        pillLbl.Text = b.emoji .. " " .. b.label
         pillLbl.TextColor3 = b.color
         pcall(function() pill:FindFirstChildOfClass("UIStroke").Color = b.color end)
     end
 
-    local btnY = nameY + 80
+    local btnY = nameY + 82
     local loadBtn = new("TextButton", {Size = UDim2.new(1, -60, 0, 48),
-        Position = UDim2.fromOffset(30, btnY), BackgroundColor3 = Theme.accent,
+        Position = UDim2.fromOffset(30, btnY), BackgroundColor3 = Theme.neon,
         Text = "LOAD SCRIPT", Font = Enum.Font.GothamBlack, TextSize = 15,
         TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = false,
         BorderSizePixel = 0, ZIndex = 13, ClipsDescendants = true}, card)
     corner(loadBtn, 12)
-    grad(loadBtn, Theme.accent, Theme.accent3, 0)
-    local lStroke = stroke(loadBtn, Theme.accent2, 1.5, 0.3)
+    grad(loadBtn, Theme.neon, Theme.accent3, 0)
+    local lStroke = stroke(loadBtn, Theme.accent2, 1.5, 0.25)
 
-    loadBtn.MouseEnter:Connect(function() Tween:Create(lStroke, TweenInfo.new(0.15), {Transparency = 0}):Play() end)
-    loadBtn.MouseLeave:Connect(function() Tween:Create(lStroke, TweenInfo.new(0.15), {Transparency = 0.3}):Play() end)
+    local lShine = new("Frame", {Size = UDim2.new(0.4, 0, 1, 0),
+        Position = UDim2.new(-0.5, 0, 0, 0), BackgroundColor3 = Color3.new(1, 1, 1),
+        BackgroundTransparency = 0.75, BorderSizePixel = 0, ZIndex = 14}, loadBtn)
+    corner(lShine, 6)
+    new("UIGradient", {Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 1),
+        NumberSequenceKeypoint.new(0.5, 0.3),
+        NumberSequenceKeypoint.new(1, 1),
+    }), Rotation = 0}, lShine)
+    task.spawn(function()
+        while lShine.Parent do
+            lShine.Position = UDim2.new(-0.5, 0, 0, 0)
+            Tween:Create(lShine, TweenInfo.new(2.4, Enum.EasingStyle.Linear),
+                {Position = UDim2.new(1.5, 0, 0, 0)}):Play()
+            task.wait(3)
+        end
+    end)
+
+    loadBtn.MouseEnter:Connect(function()
+        Tween:Create(lStroke, TweenInfo.new(0.15), {Transparency = 0}):Play()
+    end)
+    loadBtn.MouseLeave:Connect(function()
+        Tween:Create(lStroke, TweenInfo.new(0.15), {Transparency = 0.25}):Play()
+    end)
 
     card.Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 + 90)
     card.BackgroundTransparency = 1
@@ -755,7 +750,7 @@ local function showVerifiedScreen(user)
     return true
 end
 
---==================== KEY PROMPT ====================
+--==================== KEY PROMPT (3-STEP GATE) ====================
 local function showKeyPrompt()
     local pg = LP:WaitForChild("PlayerGui")
     local existing = pg:FindFirstChild("ReaperKeyPrompt")
@@ -774,17 +769,17 @@ local function showKeyPrompt()
     end)
 
     local backdrop = new("Frame", {Size = UDim2.fromScale(1, 1),
-        BackgroundColor3 = Color3.fromRGB(1, 2, 6), BackgroundTransparency = 1,
+        BackgroundColor3 = Color3.fromRGB(1, 1, 4), BackgroundTransparency = 1,
         BorderSizePixel = 0, ZIndex = 1}, promptGui)
     Tween:Create(backdrop, TweenInfo.new(0.4), {BackgroundTransparency = 0.35}):Play()
 
     local bgGlow = new("Frame", {Size = UDim2.fromScale(1.2, 1.2),
         Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.96,
+        BackgroundColor3 = Theme.neon, BackgroundTransparency = 0.95,
         BorderSizePixel = 0, ZIndex = 2}, backdrop)
     corner(bgGlow, 500)
     local bgGlowGrad = new("UIGradient", {
-        Color = ColorSequence.new(Theme.accent, Theme.accent3), Rotation = 0}, bgGlow)
+        Color = ColorSequence.new(Theme.neon, Theme.accent3), Rotation = 0}, bgGlow)
     task.spawn(function()
         local a = 0
         while bgGlow.Parent do
@@ -794,24 +789,24 @@ local function showKeyPrompt()
         end
     end)
 
-    local cardW, cardH = 470, 500
+    local cardW, cardH = 480, 560
     local card = new("Frame", {Size = UDim2.fromOffset(cardW, cardH),
         Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 + 30),
         BackgroundColor3 = Theme.bg, BorderSizePixel = 0, ZIndex = 10}, promptGui)
     corner(card, 22)
-    grad(card, Color3.fromRGB(11, 15, 28), Color3.fromRGB(3, 5, 12), 90)
-    dropShadow(card, 22, 18, 0.6)
+    grad(card, Color3.fromRGB(14, 8, 28), Color3.fromRGB(2, 1, 6), 90)
+    dropShadow(card, 22, 20, 0.7)
 
     local borderGlow = new("Frame", {Size = UDim2.new(1, 16, 1, 16),
         Position = UDim2.new(0.5, 0, 0.5, 0), AnchorPoint = Vector2.new(0.5, 0.5),
-        BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.55,
+        BackgroundColor3 = Theme.neon, BackgroundTransparency = 0.5,
         BorderSizePixel = 0, ZIndex = 9}, card)
     corner(borderGlow, 26)
     local borderGrad = new("UIGradient", {Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Theme.accent),
+        ColorSequenceKeypoint.new(0, Theme.neon),
         ColorSequenceKeypoint.new(0.33, Theme.accent3),
-        ColorSequenceKeypoint.new(0.66, Color3.fromRGB(130, 225, 255)),
-        ColorSequenceKeypoint.new(1, Theme.accent),
+        ColorSequenceKeypoint.new(0.66, Color3.fromRGB(200, 220, 255)),
+        ColorSequenceKeypoint.new(1, Theme.neon),
     })}, borderGlow)
     task.spawn(function()
         while borderGlow.Parent do
@@ -823,82 +818,105 @@ local function showKeyPrompt()
         end
     end)
 
-    new("TextLabel", {Size = UDim2.new(1, 0, 0, 24),
-        Position = UDim2.fromOffset(0, 24), BackgroundTransparency = 1,
-        Text = "DISCORD VERIFICATION", Font = Enum.Font.GothamBlack,
-        TextSize = 18, TextColor3 = Theme.accent2, ZIndex = 12}, card)
-    new("TextLabel", {Size = UDim2.new(1, -40, 0, 18),
-        Position = UDim2.fromOffset(20, 50), BackgroundTransparency = 1,
-        Text = "Complete both steps to unlock REAPER.",
+    new("TextLabel", {Size = UDim2.new(1, 0, 0, 26),
+        Position = UDim2.fromOffset(0, 20), BackgroundTransparency = 1,
+        Text = "VERIFICATION", Font = Enum.Font.GothamBlack,
+        TextSize = 20, TextColor3 = Theme.neon, ZIndex = 12}, card)
+    new("TextLabel", {Size = UDim2.new(1, -40, 0, 16),
+        Position = UDim2.fromOffset(20, 48), BackgroundTransparency = 1,
+        Text = "Follow the 3 steps in order to unlock REAPER.",
         Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = Theme.muted, ZIndex = 12}, card)
 
-    local s1 = new("Frame", {Size = UDim2.new(1, -60, 0, 116),
-        Position = UDim2.fromOffset(30, 88), BackgroundColor3 = Theme.panel,
-        BackgroundTransparency = 0.2, BorderSizePixel = 0, ZIndex = 12}, card)
+    -- ============ STEP 1: JOIN ============
+    local s1 = new("Frame", {Size = UDim2.new(1, -60, 0, 130),
+        Position = UDim2.fromOffset(30, 78), BackgroundColor3 = Theme.panel,
+        BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 12}, card)
     corner(s1, 12)
     local s1Stroke = stroke(s1, Theme.strokeSoft, 1.2, 0.4)
-    grad(s1, Color3.fromRGB(24, 34, 58), Theme.panel, 90)
+    grad(s1, Color3.fromRGB(28, 16, 52), Theme.panel, 90)
+
     local s1Tag = new("Frame", {Size = UDim2.fromOffset(26, 26),
-        Position = UDim2.fromOffset(14, 14), BackgroundColor3 = Theme.accent,
+        Position = UDim2.fromOffset(14, 14), BackgroundColor3 = Theme.neon,
         BorderSizePixel = 0, ZIndex = 13}, s1)
     corner(s1Tag, 13)
     local s1TagLbl = new("TextLabel", {Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1, Text = "1", Font = Enum.Font.GothamBlack,
         TextSize = 12, TextColor3 = Color3.new(1,1,1), ZIndex = 14}, s1Tag)
+
     new("TextLabel", {Size = UDim2.new(1, -56, 0, 18),
         Position = UDim2.fromOffset(48, 14), BackgroundTransparency = 1,
         Text = "JOIN THE DISCORD SERVER", Font = Enum.Font.GothamBold,
         TextSize = 11, TextColor3 = Theme.text,
         TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 13}, s1)
-    new("TextLabel", {Size = UDim2.new(1, -56, 0, 14),
+    new("TextLabel", {Size = UDim2.new(1, -56, 0, 30),
         Position = UDim2.fromOffset(48, 32), BackgroundTransparency = 1,
-        Text = "Copy the invite link, paste it in your browser, and join.",
+        Text = "Click the button below to copy the invite, join, and come back.\nThen click CHECK MY JOIN STATUS.",
         Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.muted,
-        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 13}, s1)
-    local invBtn = new("TextButton", {Size = UDim2.new(1, -28, 0, 40),
-        Position = UDim2.fromOffset(14, 62), BackgroundColor3 = Theme.accent,
-        Text = "🔗  COPY DISCORD INVITE", Font = Enum.Font.GothamBold, TextSize = 12,
-        TextColor3 = Color3.new(1,1,1), AutoButtonColor = false,
-        BorderSizePixel = 0, ZIndex = 13, ClipsDescendants = true}, s1)
-    corner(invBtn, 9)
-    local invGrad = grad(invBtn, Theme.accent, Theme.accent3, 0)
-    local invStroke = stroke(invBtn, Theme.accent2, 1.3, 0.3)
+        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 13}, s1)
 
-    local s2 = new("Frame", {Size = UDim2.new(1, -60, 0, 116),
-        Position = UDim2.fromOffset(30, 214), BackgroundColor3 = Theme.panel,
-        BackgroundTransparency = 0.2, BorderSizePixel = 0, ZIndex = 12}, card)
+    local invBtn = new("TextButton", {Size = UDim2.new(1, -32, 0, 34),
+        Position = UDim2.fromOffset(16, 66), BackgroundColor3 = Theme.neon,
+        Text = "🔗  COPY INVITE LINK", Font = Enum.Font.GothamBold, TextSize = 11,
+        TextColor3 = Color3.new(1,1,1), AutoButtonColor = false,
+        BorderSizePixel = 0, ZIndex = 13}, s1)
+    corner(invBtn, 8)
+    local invGrad = grad(invBtn, Theme.neon, Theme.accent3, 0)
+
+    local checkBtn = new("TextButton", {Size = UDim2.new(1, -32, 0, 26),
+        Position = UDim2.fromOffset(16, 102), BackgroundColor3 = Theme.panel2,
+        Text = "✓  CHECK MY JOIN STATUS", Font = Enum.Font.GothamBold, TextSize = 10,
+        TextColor3 = Theme.accent2, AutoButtonColor = false,
+        BorderSizePixel = 0, ZIndex = 13}, s1)
+    corner(checkBtn, 6)
+    local checkStroke = stroke(checkBtn, Theme.strokeSoft, 1)
+
+    -- ============ STEP 2: AUTHORIZE ============
+    local s2 = new("Frame", {Size = UDim2.new(1, -60, 0, 150),
+        Position = UDim2.fromOffset(30, 216), BackgroundColor3 = Theme.panel,
+        BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 12}, card)
     corner(s2, 12)
     local s2Stroke = stroke(s2, Theme.strokeSoft, 1.2, 0.4)
-    grad(s2, Color3.fromRGB(24, 34, 58), Theme.panel, 90)
+    grad(s2, Color3.fromRGB(28, 16, 52), Theme.panel, 90)
+
     local s2Tag = new("Frame", {Size = UDim2.fromOffset(26, 26),
-        Position = UDim2.fromOffset(14, 14), BackgroundColor3 = Theme.accent,
+        Position = UDim2.fromOffset(14, 14), BackgroundColor3 = Theme.strokeSoft,
         BorderSizePixel = 0, ZIndex = 13}, s2)
     corner(s2Tag, 13)
     local s2TagLbl = new("TextLabel", {Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1, Text = "2", Font = Enum.Font.GothamBlack,
         TextSize = 12, TextColor3 = Color3.new(1,1,1), ZIndex = 14}, s2Tag)
+
     new("TextLabel", {Size = UDim2.new(1, -56, 0, 18),
         Position = UDim2.fromOffset(48, 14), BackgroundTransparency = 1,
         Text = "AUTHORIZE THE APP", Font = Enum.Font.GothamBold,
-        TextSize = 11, TextColor3 = Theme.text,
+        TextSize = 11, TextColor3 = Theme.muted,
         TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 13}, s2)
-    new("TextLabel", {Size = UDim2.new(1, -56, 0, 14),
+    new("TextLabel", {Size = UDim2.new(1, -56, 0, 44),
         Position = UDim2.fromOffset(48, 32), BackgroundTransparency = 1,
-        Text = "Copy the link, open it, and click Authorize.",
+        Text = "🔒 LOCKED — complete step 1 first.\nOnce unlocked, click the button to copy the auth link.\nYou can copy it as many times as you need.",
         Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.muted,
-        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 13}, s2)
-    local authBtn = new("TextButton", {Size = UDim2.new(1, -28, 0, 40),
-        Position = UDim2.fromOffset(14, 62), BackgroundColor3 = Theme.accent,
-        Text = "🔐  COPY AUTH LINK", Font = Enum.Font.GothamBold, TextSize = 12,
-        TextColor3 = Color3.new(1,1,1), AutoButtonColor = false,
-        BorderSizePixel = 0, ZIndex = 13, ClipsDescendants = true}, s2)
-    corner(authBtn, 9)
-    local authGrad = grad(authBtn, Theme.accent, Theme.accent3, 0)
-    local authStroke = stroke(authBtn, Theme.accent2, 1.3, 0.3)
+        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 13}, s2)
 
+    local authBtn = new("TextButton", {Size = UDim2.new(1, -32, 0, 34),
+        Position = UDim2.fromOffset(16, 84), BackgroundColor3 = Theme.panel2,
+        Text = "🔒  LOCKED", Font = Enum.Font.GothamBold, TextSize = 11,
+        TextColor3 = Theme.muted, AutoButtonColor = false,
+        BorderSizePixel = 0, ZIndex = 13}, s2)
+    corner(authBtn, 8)
+    local authGrad = grad(authBtn, Theme.panel2, Theme.panel2, 0)
+
+    local pollBtn = new("TextButton", {Size = UDim2.new(1, -32, 0, 26),
+        Position = UDim2.fromOffset(16, 122), BackgroundColor3 = Theme.panel2,
+        Text = "⏳  WAITING FOR AUTH…", Font = Enum.Font.GothamBold, TextSize = 10,
+        TextColor3 = Theme.muted, AutoButtonColor = false,
+        Visible = false, BorderSizePixel = 0, ZIndex = 13}, s2)
+    corner(pollBtn, 6)
+    stroke(pollBtn, Theme.strokeSoft, 1)
+
+    -- ============ STATUS BAR ============
     local statusWrap = new("Frame", {Size = UDim2.new(1, -60, 0, 60),
-        Position = UDim2.fromOffset(30, 340), BackgroundColor3 = Theme.panel,
-        BackgroundTransparency = 0.4, BorderSizePixel = 0, ZIndex = 12}, card)
+        Position = UDim2.fromOffset(30, 376), BackgroundColor3 = Theme.panel,
+        BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 12}, card)
     corner(statusWrap, 10)
     local statusStroke = stroke(statusWrap, Theme.strokeSoft, 1, 0.5)
     local dot = new("Frame", {Size = UDim2.fromOffset(9, 9),
@@ -907,7 +925,7 @@ local function showKeyPrompt()
     corner(dot, 5)
     local statusLbl2 = new("TextLabel", {Size = UDim2.new(1, -40, 1, -10),
         Position = UDim2.fromOffset(30, 5), BackgroundTransparency = 1,
-        Text = "Ready. Start with Step 1.",
+        Text = "Step 1: join the server.",
         Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = Theme.muted,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Center,
@@ -919,106 +937,205 @@ local function showKeyPrompt()
         Tween:Create(statusStroke, TweenInfo.new(0.2), {Color = dcol or Theme.strokeSoft}):Play()
     end
 
+    -- ============ PROGRESS BAR ============
     local progWrap = new("Frame", {Size = UDim2.new(1, -60, 0, 5),
-        Position = UDim2.fromOffset(30, 408), BackgroundColor3 = Theme.panel2,
+        Position = UDim2.fromOffset(30, 444), BackgroundColor3 = Theme.panel2,
         BorderSizePixel = 0, ZIndex = 12}, card)
     corner(progWrap, 3)
     local progFill = new("Frame", {Size = UDim2.new(0, 0, 1, 0),
         BackgroundColor3 = Theme.success, BorderSizePixel = 0, ZIndex = 13}, progWrap)
     corner(progFill, 3)
-    grad(progFill, Theme.accent, Theme.success, 0)
+    grad(progFill, Theme.neon, Theme.success, 0)
 
+    new("TextLabel", {Size = UDim2.new(1, 0, 0, 16),
+        Position = UDim2.new(0, 0, 1, -22), BackgroundTransparency = 1,
+        Text = "REAPER  ·  step-by-step verification",
+        Font = Enum.Font.GothamMedium, TextSize = 10,
+        TextColor3 = Theme.muted, ZIndex = 12}, card)
+
+    -- ============ STATE ============
     local result = {done = false, user = nil}
     local sessionId = nil
     local polling = false
-    local step1Done = false
 
-    local function markStep1()
-        if step1Done then return end
-        step1Done = true
+    -- Unlock Step 2
+    local function unlockStep2()
+        if JOIN_CONFIRMED then return end
+        JOIN_CONFIRMED = true
         Tween:Create(s1Stroke, TweenInfo.new(0.35), {Color = Theme.success, Transparency = 0}):Play()
         s1Tag.BackgroundColor3 = Theme.success
         s1TagLbl.Text = "✓"
-        invBtn.Text = "✓ COPIED — JOIN NOW"
-        invGrad.Color = ColorSequence.new(Theme.success, Theme.accent)
+
+        Tween:Create(s2Stroke, TweenInfo.new(0.35), {Color = Theme.neon, Transparency = 0}):Play()
+        s2Tag.BackgroundColor3 = Theme.neon
+        Tween:Create(authGrad, TweenInfo.new(0.4), {
+            Color = ColorSequence.new(Theme.neon, Theme.accent3)}):Play()
+        authBtn.BackgroundColor3 = Theme.neon
+        authBtn.Text = "🔐  COPY AUTH LINK"
+        authBtn.TextColor3 = Color3.new(1, 1, 1)
         Tween:Create(progFill, TweenInfo.new(0.5, Enum.EasingStyle.Quart),
             {Size = UDim2.new(0.5, 0, 1, 0)}):Play()
+        setStatus("Step 1 complete. Now authorize the app (Step 2).", Theme.success, Theme.success)
     end
 
-    invBtn.MouseEnter:Connect(function() Tween:Create(invStroke, TweenInfo.new(0.15), {Transparency = 0}):Play() end)
-    invBtn.MouseLeave:Connect(function() Tween:Create(invStroke, TweenInfo.new(0.15), {Transparency = 0.3}):Play() end)
+    -- ============ STEP 1 BUTTONS ============
     invBtn.MouseButton1Click:Connect(function()
         copyToClipboard(DISCORD_INVITE)
         tryOpenBrowser(DISCORD_INVITE)
-        markStep1()
-        setStatus("Invite copied! Paste it in your browser to join.", Theme.accent2, Theme.accent2)
+        invBtn.Text = "✓  COPIED — JOIN NOW"
+        setStatus("Invite copied. Join the server, then click CHECK MY JOIN STATUS.",
+            Theme.accent2, Theme.accent2)
     end)
 
-    authBtn.MouseEnter:Connect(function() Tween:Create(authStroke, TweenInfo.new(0.15), {Transparency = 0}):Play() end)
-    authBtn.MouseLeave:Connect(function() Tween:Create(authStroke, TweenInfo.new(0.15), {Transparency = 0.3}):Play() end)
-
-    local function pollLoop()
-        while polling do
-            task.wait(2)
-            if not polling or not sessionId then break end
-            local resp = postJSON("/oauth/poll", {session = sessionId, robloxId = tostring(LP.UserId)})
-            if not resp then
-                setStatus("Network hiccup — retrying…", Theme.danger, Theme.danger)
-            elseif resp.status == "ok" and resp.key then
-                SESSION_KEY = resp.key
-                saveStoredKey(resp.key)
-                Tween:Create(s2Stroke, TweenInfo.new(0.35), {Color = Theme.success, Transparency = 0}):Play()
-                s2Tag.BackgroundColor3 = Theme.success
-                s2TagLbl.Text = "✓"
-                authBtn.Text = "✓ VERIFIED"
-                authGrad.Color = ColorSequence.new(Theme.success, Theme.accent)
-                setStatus("Verified! Loading welcome screen…", Theme.success, Theme.success)
-                Tween:Create(progFill, TweenInfo.new(0.5, Enum.EasingStyle.Quart),
-                    {Size = UDim2.new(1, 0, 1, 0)}):Play()
-                polling = false
-                task.wait(0.9)
-                Tween:Create(card, TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
-                    {Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 - 30), BackgroundTransparency = 1}):Play()
-                task.wait(0.35)
-                promptGui:Destroy()
-                result.done = true
-                result.user = {
-                    key = resp.key,
-                    username = resp.username or "user",
-                    displayName = resp.displayName or resp.username or "Verified",
-                    avatar = resp.avatar or "",
-                    discordId = resp.discordId or "",
-                    rank = resp.rank or nil,
-                    badgeUrl = resp.badgeUrl or nil,
-                }
-                return
-            elseif resp.status == "pending" then
-                dot.BackgroundTransparency = 0.3 + math.sin(tick() * 4) * 0.3
+    checkBtn.MouseButton1Click:Connect(function()
+        if JOIN_CONFIRMED then
+            setStatus("Already confirmed ✓ you can proceed to step 2.", Theme.success, Theme.success)
+            return
+        end
+        checkBtn.Text = "⏳  CHECKING…"
+        task.spawn(function()
+            local found = false
+            -- Try every plausible source of the discord ID we have so far:
+            -- 1. If we already know it, use it directly.
+            local tryIds = {}
+            if DETECTED_DISCORD_ID then tryIds[#tryIds+1] = DETECTED_DISCORD_ID end
+            if SESSION_KEY then
+                local resp = postJSON("/check", {robloxId = tostring(LP.UserId), key = SESSION_KEY})
+                if resp and resp.valid and resp.discordId then
+                    tryIds[#tryIds+1] = resp.discordId
+                end
             end
+
+            if #tryIds == 0 then
+                checkBtn.Text = "✓  CHECK MY JOIN STATUS"
+                setStatus("Authorize the app first so we can identify your Discord — clicking COPY AUTH LINK will unlock after that.",
+                    Theme.gold, Theme.gold)
+                return
+            end
+
+            for _, id in ipairs(tryIds) do
+                local resp = postJSON("/check-guild", {discordId = id})
+                if resp and resp.inGuild then
+                    found = true
+                    DETECTED_DISCORD_ID = id
+                    break
+                end
+            end
+
+            checkBtn.Text = "✓  CHECK MY JOIN STATUS"
+            if found then
+                unlockStep2()
+            else
+                setStatus("Not in the server yet. Join via the invite, then click CHECK MY JOIN STATUS again.",
+                    Theme.danger, Theme.danger)
+            end
+        end)
+    end)
+
+    -- ============ STEP 2: AUTH BUTTON ============
+    authBtn.MouseButton1Click:Connect(function()
+        if not JOIN_CONFIRMED then
+            setStatus("Complete Step 1 first: join the server.", Theme.gold, Theme.gold)
+            task.wait(1.2)
+            return
+        end
+
+        -- Every click generates a fresh session and copies the auth link.
+        -- Older sessions expire on the worker side automatically.
+        local newSid = "rpr_" .. tostring(LP.UserId) .. "_" ..
+            tostring(math.random(100000, 999999)) .. "_" ..
+            tostring(math.floor(tick() * 1000))
+
+        local link = KEY_API .. "/oauth/start?session=" .. newSid
+        copyToClipboard(link)
+        tryOpenBrowser(link)
+
+        authBtn.Text = "✓  COPIED — OPEN IN BROWSER"
+        task.delay(2.5, function()
+            if authBtn and authBtn.Parent then
+                authBtn.Text = "🔐  COPY AUTH LINK"
+            end
+        end)
+
+        setStatus("Auth link copied! Paste it in your browser, authorize, then come back.",
+            Theme.accent2, Theme.accent2)
+
+        -- Start (or restart) polling for this session
+        sessionId = newSid
+        if not polling then
+            polling = true
+            pollBtn.Visible = true
+            task.spawn(function()
+                while polling and sessionId do
+                    task.wait(2)
+                    if not polling or not sessionId then break end
+                    local resp = postJSON("/oauth/poll", {session = sessionId, robloxId = tostring(LP.UserId)})
+                    if not resp then
+                        setStatus("Network hiccup — retrying…", Theme.danger, Theme.danger)
+                    elseif resp.status == "ok" and resp.key then
+                        SESSION_KEY = resp.key
+                        saveStoredKey(resp.key)
+                        Tween:Create(s2Stroke, TweenInfo.new(0.35), {Color = Theme.success, Transparency = 0}):Play()
+                        s2Tag.BackgroundColor3 = Theme.success
+                        s2TagLbl.Text = "✓"
+                        authBtn.Text = "✓  VERIFIED"
+                        authBtn.BackgroundColor3 = Theme.success
+                        authGrad.Color = ColorSequence.new(Theme.success, Theme.accent)
+                        pollBtn.Text = "✓  VERIFIED"
+                        pollBtn.TextColor3 = Theme.success
+                        setStatus("Verification complete! Loading welcome screen…",
+                            Theme.success, Theme.success)
+                        Tween:Create(progFill, TweenInfo.new(0.5, Enum.EasingStyle.Quart),
+                            {Size = UDim2.new(1, 0, 1, 0)}):Play()
+                        polling = false
+                        task.wait(0.9)
+                        Tween:Create(card, TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
+                            {Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 - 30), BackgroundTransparency = 1}):Play()
+                        task.wait(0.35)
+                        promptGui:Destroy()
+                        result.done = true
+                        result.user = {
+                            key = resp.key,
+                            username = resp.username or "user",
+                            displayName = resp.displayName or resp.username or "Verified",
+                            avatar = resp.avatar or "",
+                            discordId = resp.discordId or "",
+                            rank = resp.rank or nil,
+                            badgeUrl = resp.badgeUrl or nil,
+                        }
+                        return
+                    elseif resp.status == "pending" then
+                        dot.BackgroundTransparency = 0.3 + math.sin(tick() * 4) * 0.3
+                        pollBtn.Text = "⏳  WAITING FOR AUTH…"
+                    end
+                end
+            end)
+        end
+    end)
+
+    -- Restore state if the user is already verified
+    if SESSION_KEY and SESSION_KEY ~= "" then
+        local check = postJSON("/check", {robloxId = tostring(LP.UserId), key = SESSION_KEY})
+        if check and check.valid then
+            SESSION_KEY = nil
+            clearStoredKey()
         end
     end
 
-    authBtn.MouseButton1Click:Connect(function()
-        if polling then return end
-        if not step1Done then
-            setStatus("Join the server first (Step 1).", Theme.gold, Theme.gold)
-            task.wait(1.2)
+    -- Auto check join status on load if we already know the discord id
+    task.spawn(function()
+        task.wait(0.6)
+        local storedId = nil
+        -- try a quick check if the user has SESSION_KEY stored
+        if SESSION_KEY and SESSION_KEY ~= "" then
+            local resp = postJSON("/check", {robloxId = tostring(LP.UserId), key = SESSION_KEY})
+            if resp and resp.valid and resp.discordId then storedId = resp.discordId end
         end
-        sessionId = "rpr_" .. tostring(LP.UserId) .. "_" ..
-            tostring(math.random(100000, 999999)) .. "_" ..
-            tostring(math.floor(tick() * 1000))
-        local link = KEY_API .. "/oauth/start?session=" .. sessionId
-        copyToClipboard(link)
-        local opened = tryOpenBrowser(link)
-        authBtn.Text = "WAITING FOR AUTH…"
-        authBtn.BackgroundColor3 = Theme.panel3
-        authGrad.Color = ColorSequence.new(Theme.panel3, Theme.panel2)
-        setStatus(opened and
-            "Auth link copied AND browser opened. Authorize, then come back." or
-            "Auth link copied. Paste it in your browser.",
-            Theme.accent2, Theme.accent2)
-        polling = true
-        task.spawn(pollLoop)
+        if storedId then
+            DETECTED_DISCORD_ID = storedId
+            local g = postJSON("/check-guild", {discordId = storedId})
+            if g and g.inGuild then unlockStep2() end
+        end
     end)
 
     card.Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 + 80)
@@ -1034,7 +1151,7 @@ end
 local function verifySession()
     local function tryCheck(k)
         if not k then return nil end
-        local resp = postJSON("/check", { robloxId = tostring(LP.UserId), key = k })
+        local resp = postJSON("/check", {robloxId = tostring(LP.UserId), key = k})
         if resp and resp.valid then
             return {
                 key = k,
@@ -1063,7 +1180,10 @@ local function verifySession()
 
     if SESSION_KEY then
         local user = tryCheck(SESSION_KEY)
-        if user then saveStoredKey(SESSION_KEY); return user end
+        if user then
+            saveStoredKey(SESSION_KEY)
+            return user
+        end
         SESSION_KEY = nil
     end
 
@@ -1119,7 +1239,7 @@ function makeResizable(frame, opts)
     local baseZ = (frame.ZIndex or 1) + 500
     frame.ClipsDescendants = true
     for _, c in ipairs(corners_) do
-        local grip = new("Frame", {Name = "Resize_"..c, Size = UDim2.fromOffset(gs, gs),
+        local grip = new("Frame", {Name = "Resize_" .. c, Size = UDim2.fromOffset(gs, gs),
             BackgroundTransparency = 1, ZIndex = baseZ, Active = true}, frame)
         if c == "br" then grip.Position = UDim2.new(1, -gs, 1, -gs)
         elseif c == "tr" then grip.Position = UDim2.new(1, -gs, 0, 0)
@@ -1133,7 +1253,8 @@ function makeResizable(frame, opts)
                 sSize = Vector2.new(frame.AbsoluteSize.X, frame.AbsoluteSize.Y)
             end
         end
-        grip.InputBegan:Connect(begin); hot.InputBegan:Connect(begin)
+        grip.InputBegan:Connect(begin)
+        hot.InputBegan:Connect(begin)
         UIS.InputChanged:Connect(function(i)
             if not dragging then return end
             if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
@@ -1300,8 +1421,8 @@ function ripple(parent, x, y, col, sz, dur)
     corner(r, sz)
     local s = stroke(r, col or Theme.accent, 2, 0.15)
     local t1 = Tween:Create(r, TweenInfo.new(dur or 0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
-        {Size = UDim2.fromOffset(sz*2.6, sz*2.6),
-         Position = UDim2.fromOffset(x - sz*1.3, y - sz*1.3),
+        {Size = UDim2.fromOffset(sz * 2.6, sz * 2.6),
+         Position = UDim2.fromOffset(x - sz * 1.3, y - sz * 1.3),
          BackgroundTransparency = 1})
     local t2 = Tween:Create(s, TweenInfo.new(dur or 0.4, Enum.EasingStyle.Quart), {Transparency = 1, Thickness = 1})
     t1:Play(); t2:Play()
@@ -1316,7 +1437,7 @@ function pulse(inst, sc, dur)
         inst:SetAttribute("PulseBase", base)
     end
     local s = sc or 1.06
-    local b = UDim2.new(base.X.Scale*s, base.X.Offset*s, base.Y.Scale*s, base.Y.Offset*s)
+    local b = UDim2.new(base.X.Scale * s, base.X.Offset * s, base.Y.Scale * s, base.Y.Offset * s)
     inst.Size = b
     task.delay(dur or 0.09, function()
         if inst and inst.Parent then
@@ -1349,7 +1470,7 @@ end
 function shine(inst, col, dur)
     local sh = new("Frame", {
         Size = UDim2.new(0.35, 0, 1, 0), Position = UDim2.new(-0.4, 0, 0, 0),
-        BackgroundColor3 = col or Color3.new(1,1,1), BackgroundTransparency = 0.5,
+        BackgroundColor3 = col or Color3.new(1, 1, 1), BackgroundTransparency = 0.5,
         BorderSizePixel = 0, ZIndex = (inst.ZIndex or 1) + 5,
     }, inst)
     corner(sh, 4)
@@ -1365,7 +1486,7 @@ end
 function hoverStripe(parent, col)
     local s = new("Frame", {
         Size = UDim2.new(0, 3, 0.6, 0), Position = UDim2.new(0, 0, 0.5, 0),
-        AnchorPoint = Vector2.new(0, 0.5), BackgroundColor3 = col or Theme.accent,
+        AnchorPoint = Vector2.new(0, 0.5), BackgroundColor3 = col or Theme.neon,
         BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 38,
     }, parent)
     corner(s, 2)
@@ -1386,15 +1507,15 @@ end
 
 function notify(title, msg, col, dur, copyText)
     if not Cfg.UI.Notifs or not notifStack then return end
-    col = col or Theme.accent
+    col = col or Theme.neon
     local hasCopy = type(copyText) == "string" and copyText ~= ""
     local cardH = hasCopy and 86 or 68
 
     local card = new("Frame", {Size = UDim2.new(1, 0, 0, 0),
-        BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.08,
+        BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.05,
         BorderSizePixel = 0, ZIndex = 2, ClipsDescendants = true}, notifStack)
     corner(card, 12)
-    local st = stroke(card, col, 1.6, 0.15)
+    local st = stroke(card, col, 1.8, 0.1)
     grad(card, Theme.panel2, Theme.bg, 90)
     new("Frame", {Size = UDim2.new(0, 3, 1, -14), Position = UDim2.new(0, 7, 0.5, 0),
         AnchorPoint = Vector2.new(0, 0.5), BackgroundColor3 = col, BorderSizePixel = 0, ZIndex = 3}, card)
@@ -1406,9 +1527,8 @@ function notify(title, msg, col, dur, copyText)
         TextSize = 11, TextColor3 = Theme.text, TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, ZIndex = 3}, card)
 
-    local copyBtn
     if hasCopy then
-        copyBtn = new("TextButton", {Size = UDim2.new(1, -28, 0, 20),
+        local copyBtn = new("TextButton", {Size = UDim2.new(1, -28, 0, 20),
             Position = UDim2.fromOffset(20, cardH - 26),
             BackgroundColor3 = Theme.panel2, Text = "📋  COPY ERROR",
             Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = Theme.accent2,
@@ -1441,7 +1561,6 @@ function notify(title, msg, col, dur, copyText)
         {Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, cardH)}):Play()
     shine(card, col, 0.7)
 
-    -- Auto-dismiss: if copy button exists, give a longer window (12s)
     local lifetime = dur or (hasCopy and 12 or 3.5)
     task.delay(lifetime, function()
         if not card or not card.Parent then return end
@@ -1475,9 +1594,9 @@ function serialize(v, d)
     if t == "table" then
         local p = {}
         for k, val in pairs(v) do
-            if val ~= nil then p[#p+1] = "["..serialize(k, d+1).."]="..serialize(val, d+1) end
+            if val ~= nil then p[#p+1] = "[" .. serialize(k, d+1) .. "]=" .. serialize(val, d+1) end
         end
-        return "{"..table.concat(p, ",").."}"
+        return "{" .. table.concat(p, ",") .. "}"
     end
     return "nil"
 end
@@ -1485,13 +1604,13 @@ function deserialize(s)
     if not s or s == "" then return nil end
     local f = loadstring or load
     if not f then return nil end
-    local fn = f("return "..s)
+    local fn = f("return " .. s)
     if not fn then return nil end
     local ok, r = pcall(fn)
     return ok and r or nil
 end
-function saveFile() return "Reaper_"..tostring(game.PlaceId)..".txt" end
-function autoloadFile() return "Reaper_auto_"..tostring(game.PlaceId)..".txt" end
+function saveFile() return "Reaper_" .. tostring(game.PlaceId) .. ".txt" end
+function autoloadFile() return "Reaper_auto_" .. tostring(game.PlaceId) .. ".txt" end
 function globalAutoloadFile() return "Reaper_global_auto.txt" end
 saves = _G.__ReaperSaves or {}
 _G.__ReaperSaves = saves
@@ -1530,7 +1649,7 @@ function saveLoadout(name, markAuto)
         _G.__ReaperAutoload = name
         if IO.has then pcall(IO.write, autoloadFile(), name) end
     end
-    if IO.has then pcall(IO.write, globalAutoloadFile(), game.PlaceId.."::"..name) end
+    if IO.has then pcall(IO.write, globalAutoloadFile(), game.PlaceId .. "::" .. name) end
     return true
 end
 function loadLoadout(name)
@@ -1573,7 +1692,7 @@ gui = new("ScreenGui", {Name = "ReaperUI", ResetOnSpawn = false,
     IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 9999}, pg)
 initNotifs(pg)
 
---==================== ANNOUNCEMENTS ====================
+--==================== ANNOUNCEMENTS (shows for sender too) ====================
 annGui = new("ScreenGui", {Name = "ReaperAnnounce", ResetOnSpawn = false,
     IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 10001}, pg)
 annSlot = new("Frame", {Size = UDim2.new(0, 520, 0, 0),
@@ -1603,7 +1722,8 @@ function showAnnouncement(data)
 
     local rank  = data.rank or "owner"
     local style = BADGE_STYLE[rank] or BADGE_STYLE.owner
-    local col   = style.color
+    -- Neon purple base color, gold/blue for staff-specific overrides
+    local col = style.color
 
     local cardWidth = 520
     local bodyPadX = 16
@@ -1622,19 +1742,19 @@ function showAnnouncement(data)
     local shadow = new("Frame", {
         Size = UDim2.fromOffset(cardWidth + 14, cardHeight + 14),
         Position = UDim2.fromOffset(-7, -160),
-        BackgroundColor3 = Color3.new(0, 0, 0),
-        BackgroundTransparency = 0.62,
+        BackgroundColor3 = Theme.neon,
+        BackgroundTransparency = 0.82,
         BorderSizePixel = 0, ZIndex = 2,
     }, annSlot)
     corner(shadow, 16)
 
     local card = new("Frame", {Size = UDim2.fromOffset(cardWidth, cardHeight),
         Position = UDim2.new(0, 0, 0, -180),
-        BackgroundColor3 = Theme.bg, BackgroundTransparency = 0.05,
+        BackgroundColor3 = Theme.bg, BackgroundTransparency = 0.02,
         BorderSizePixel = 0, ZIndex = 3, ClipsDescendants = true}, annSlot)
     corner(card, 14)
-    local st = stroke(card, col, 2, 0.15)
-    grad(card, Theme.panel2, Theme.bg, 90)
+    local st = stroke(card, col, 2, 0.1)
+    grad(card, Color3.fromRGB(28, 14, 56), Theme.bg, 90)
 
     new("Frame", {Size = UDim2.new(1, 0, 0, 3),
         BackgroundColor3 = col, BorderSizePixel = 0, ZIndex = 4}, card)
@@ -1656,7 +1776,7 @@ function showAnnouncement(data)
 
     new("TextLabel", {Size = UDim2.new(1, -80, 0, 14),
         Position = UDim2.fromOffset(60, 28), BackgroundTransparency = 1,
-        Text = "from "..tostring(data.sender or "?"), Font = Enum.Font.Gotham, TextSize = 10,
+        Text = "from " .. tostring(data.sender or "?"), Font = Enum.Font.Gotham, TextSize = 10,
         TextColor3 = Theme.muted, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5}, card)
 
     new("TextLabel", {Size = UDim2.fromOffset(bodyWidth, bodyHeight),
@@ -1715,19 +1835,16 @@ function sendAnnouncement(text)
         })
         local ok, res = httpPost(KEY_API .. "/announce/send", body)
         if ok then
+            -- Show immediately for the sender too (before poll catches up)
+            showAnnouncement({
+                text = text, sender = LP.Name,
+                userId = LP.UserId, rank = getLocalRank() or "owner",
+                time = os.time(),
+            })
             notify("Announcement sent", "Broadcast to all servers", Theme.success, 3)
         else
-            local reason
-            if type(res) == "table" then
-                reason = res.Body or res.body or res.Data or tostring(res)
-            else
-                reason = tostring(res)
-            end
-            -- extract the useful JSON error if possible
-            local decoded
-            pcall(function() decoded = HttpService:JSONDecode(reason) end)
-            local pretty = decoded and decoded.error and ("worker: "..tostring(decoded.error)) or tostring(reason)
-            notify("Announce failed", pretty, Theme.danger, 5, pretty)
+            local pretty = parseErrorReason(res)
+            notify("Announce failed", pretty, Theme.danger, 8, pretty)
         end
     end)
     return true
@@ -1742,11 +1859,11 @@ reticle = new("Frame", {Size = UDim2.fromOffset(110, 110), AnchorPoint = Vector2
     BackgroundTransparency = 1, Visible = false}, crossGui)
 RSIZE = 110
 ring1 = new("Frame", {Size = UDim2.fromOffset(RSIZE, RSIZE), BackgroundTransparency = 1, ZIndex = 6}, reticle)
-corner(ring1, RSIZE); ring1S = stroke(ring1, Theme.accent, 2, 0.15)
-ring2 = new("Frame", {Size = UDim2.fromOffset(RSIZE-14, RSIZE-14),
+corner(ring1, RSIZE); ring1S = stroke(ring1, Theme.neon, 2, 0.15)
+ring2 = new("Frame", {Size = UDim2.fromOffset(RSIZE - 14, RSIZE - 14),
     Position = UDim2.fromOffset(7, 7), BackgroundTransparency = 1, ZIndex = 7}, reticle)
-corner(ring2, RSIZE); ring2S = stroke(ring2, Theme.accent, 1, 0.5)
-trackLine = new("Frame", {BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.55,
+corner(ring2, RSIZE); ring2S = stroke(ring2, Theme.neon, 1, 0.5)
+trackLine = new("Frame", {BackgroundColor3 = Theme.neon, BackgroundTransparency = 0.55,
     AnchorPoint = Vector2.new(0, 0.5), BorderSizePixel = 0, ZIndex = 5, Visible = false}, crossGui)
 hpBar = new("Frame", {Size = UDim2.fromOffset(4, 60), Position = UDim2.new(1, 10, 0.5, -30),
     BackgroundColor3 = Theme.danger, BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 10}, reticle)
@@ -1755,7 +1872,7 @@ hpFill = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = Theme.su
     BorderSizePixel = 0, ZIndex = 11}, hpBar)
 corner(hpFill, 2)
 retName = new("TextLabel", {Size = UDim2.new(1, 60, 0, 18), Position = UDim2.new(0, -30, 1, 10),
-    BackgroundTransparency = 1, Font = Enum.Font.GothamBlack, TextSize = 14, TextColor3 = Theme.accent2,
+    BackgroundTransparency = 1, Font = Enum.Font.GothamBlack, TextSize = 14, TextColor3 = Theme.neon,
     Text = "", TextStrokeTransparency = 0.3, TextStrokeColor3 = Color3.new(0,0,0), ZIndex = 12}, reticle)
 retDist = new("TextLabel", {Size = UDim2.new(1, 60, 0, 13), Position = UDim2.new(0, -30, 1, 28),
     BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = Theme.muted,
@@ -1782,7 +1899,7 @@ function runAction(id)
             mR.AssemblyLinearVelocity = Vector3.zero
             mR.CFrame = tR.CFrame + Vector3.new(0, 3, 0)
             mR.AssemblyLinearVelocity = Vector3.zero
-            notify("Teleported", t.Name, Theme.accent)
+            notify("Teleported", t.Name, Theme.neon)
         end
     elseif id == "spectate" then
         if RA.spectateTarget == t then
@@ -1790,7 +1907,7 @@ function runAction(id)
             notify("Spectate off", "", Theme.muted, 1.5)
         else
             RA.spectateTarget = t; RA.spectateZoom = 1
-            notify("Spectating", t.Name.." · scroll to zoom", Theme.accent3, 3)
+            notify("Spectating", t.Name .. " · scroll to zoom", Theme.accent3, 3)
         end
     elseif id == "hump" then
         TS.target = t
@@ -1805,18 +1922,18 @@ function rebuildChips()
         if not c:IsA("UIListLayout") then c:Destroy() end
     end
     local list = {
-        {id = "teleport", label = "TP", key = RA.keys.teleport, col = Theme.accent},
+        {id = "teleport", label = "TP", key = RA.keys.teleport, col = Theme.neon},
         {id = "spectate", label = "SPEC", key = RA.keys.spectate, col = Theme.accent3},
     }
     if Cfg.Troll.Hump then
-        list[#list+1] = {id = "hump", label = "HUMP", key = RA.keys.hump, col = Theme.gold}
+        list[#list + 1] = {id = "hump", label = "HUMP", key = RA.keys.hump, col = Theme.gold}
     end
     for _, a in ipairs(list) do
         if a.key then
             local chip = new("TextButton", {
                 Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X,
                 BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.2,
-                Text = a.label.." ["..a.key.Name.."]", Font = Enum.Font.GothamBold,
+                Text = a.label .. " [" .. a.key.Name .. "]", Font = Enum.Font.GothamBold,
                 TextSize = 9, TextColor3 = a.col, AutoButtonColor = false, ZIndex = 14,
             }, retActions)
             corner(chip, 4)
@@ -1839,7 +1956,7 @@ do
     RA.keys.teleport = u[1]; RA.keys.spectate = u[2]; RA.keys.hump = u[3]
 end
 
---==================== CROSSHAIR / RETICLE loop ====================
+--==================== CROSSHAIR / RETICLE LOOP ====================
 task.spawn(function()
     while crossGui.Parent do
         RS.RenderStepped:Wait()
@@ -1866,7 +1983,7 @@ task.spawn(function()
             }) do
                 local f = new("Frame", {Size = UDim2.fromOffset(spec[2].X, spec[2].Y),
                     Position = UDim2.new(0.5, spec[1].X, 0.5, spec[1].Y),
-                    AnchorPoint = Vector2.new(0.5, 0.5), BackgroundColor3 = Theme.accent,
+                    AnchorPoint = Vector2.new(0.5, 0.5), BackgroundColor3 = Theme.neon,
                     BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 5}, crosshair)
                 corner(f, 1)
             end
@@ -1908,17 +2025,17 @@ task.spawn(function()
                     if on and sp.Z > 0 then
                         local col = reticleColour(picked)
                         reticle.Visible = true
-                        local pv = Cfg.UI.CrosshairPulse and (0.96 + math.sin(tick()*7)*0.06) or 1
+                        local pv = Cfg.UI.CrosshairPulse and (0.96 + math.sin(tick() * 7) * 0.06) or 1
                         local ss = RSIZE * pv
                         reticle.Position = UDim2.fromOffset(sp.X, sp.Y)
                         reticle.Size = UDim2.fromOffset(ss, ss)
                         local sc = ss / RSIZE
                         ring1.Size = UDim2.fromOffset(ss, ss)
-                        ring2.Size = UDim2.fromOffset(ss - 14*sc, ss - 14*sc)
-                        ring2.Position = UDim2.fromOffset(7*sc, 7*sc)
+                        ring2.Size = UDim2.fromOffset(ss - 14 * sc, ss - 14 * sc)
+                        ring2.Position = UDim2.fromOffset(7 * sc, 7 * sc)
                         ring1S.Color, ring2S.Color = col, col
                         retName.TextColor3 = col
-                        retName.Text = (picked.DisplayName or picked.Name).." "..roleLabel(picked)
+                        retName.Text = (picked.DisplayName or picked.Name) .. " " .. roleLabel(picked)
                         local dist = (Cam.CFrame.Position - head.Position).Magnitude
                         retDist.Text = string.format("⌖ %d studs", math.floor(dist))
                         if Cfg.UI.ReticleHP and h then
@@ -1930,7 +2047,7 @@ task.spawn(function()
                         else hpBar.Visible = false end
                         if Cfg.UI.ReticleLine then
                             local dx, dy = sp.X - m.X, sp.Y - m.Y
-                            local len = math.sqrt(dx*dx + dy*dy)
+                            local len = math.sqrt(dx * dx + dy * dy)
                             if len > 25 then
                                 trackLine.Visible = true
                                 trackLine.Position = UDim2.fromOffset(m.X, m.Y)
@@ -1964,8 +2081,8 @@ RS.RenderStepped:Connect(function(dt)
             if hrp_ then
                 Cam.CameraType = Enum.CameraType.Scriptable
                 local d = 8 * RA.spectateZoom
-                local want = hrp_.Position + hrp_.CFrame.LookVector * -d + Vector3.new(0, 3*RA.spectateZoom, 0)
-                Cam.CFrame = Cam.CFrame:Lerp(CFrame.new(want, hrp_.Position + hrp_.CFrame.LookVector), math.clamp(dt*6, 0, 1))
+                local want = hrp_.Position + hrp_.CFrame.LookVector * -d + Vector3.new(0, 3 * RA.spectateZoom, 0)
+                Cam.CFrame = Cam.CFrame:Lerp(CFrame.new(want, hrp_.Position + hrp_.CFrame.LookVector), math.clamp(dt * 6, 0, 1))
             end
         elseif Cam.CameraType == Enum.CameraType.Scriptable and not Cfg.Movement.Freecam then
             Cam.CameraType = Enum.CameraType.Custom
@@ -1973,82 +2090,119 @@ RS.RenderStepped:Connect(function(dt)
     end)
 end)
 
---==================== LOGO ====================
-LW, LH = 160, 50
+--==================== LOGO (redesigned — hexagon shield) ====================
+LW, LH = 170, 54
 logo = new("TextButton", {Name = "Logo", Size = UDim2.fromOffset(LW, LH),
     Position = UDim2.new(0.5, -LW/2, 0, 12), BackgroundTransparency = 1, Text = "",
     AutoButtonColor = false, ZIndex = 60}, gui)
-aura = tAcc(new("Frame", {Size = UDim2.fromScale(1.08, 1.2),
+
+-- Outer aura
+aura = new("Frame", {Size = UDim2.fromScale(1.1, 1.25),
     Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
-    BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.62,
-    BorderSizePixel = 0, ZIndex = 1}, logo))
-corner(aura, 14)
+    BackgroundColor3 = Theme.neon, BackgroundTransparency = 0.55,
+    BorderSizePixel = 0, ZIndex = 1}, logo)
+corner(aura, 16)
+
+-- Main body
 back = tBg(new("Frame", {Size = UDim2.fromScale(1, 1),
     Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
     BackgroundColor3 = Theme.bg, BorderSizePixel = 0, ZIndex = 2}, logo))
-corner(back, 14); grad(back, Theme.panel, Theme.bg, 90)
-backStroke = tAcc(stroke(back, Theme.accent, 1.5, 0.2))
-dropShadow(back, 14, 10, 0.5)
+corner(back, 14)
+grad(back, Color3.fromRGB(22, 10, 44), Theme.bgDeep, 90)
+backStroke = tAcc(stroke(back, Theme.neon, 1.8, 0.15))
+dropShadow(back, 14, 10, 0.6)
+
+-- Animated rainbow outline
 ring = new("Frame", {Size = UDim2.fromScale(1, 1),
     Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
     BackgroundTransparency = 1, ZIndex = 3}, logo)
 corner(ring, 14)
-new("UIStroke", {Color = Color3.new(1, 1, 1), Thickness = 1.4}, ring)
+new("UIStroke", {Color = Color3.new(1, 1, 1), Thickness = 1.6}, ring)
 ringG = new("UIGradient", {Color = ColorSequence.new({
-    ColorSequenceKeypoint.new(0, Color3.fromRGB(160, 90, 255)),
-    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(230, 110, 255)),
-    ColorSequenceKeypoint.new(1, Color3.fromRGB(160, 90, 255)),
+    ColorSequenceKeypoint.new(0, Theme.neon),
+    ColorSequenceKeypoint.new(0.33, Theme.accent3),
+    ColorSequenceKeypoint.new(0.66, Color3.fromRGB(180, 220, 255)),
+    ColorSequenceKeypoint.new(1, Theme.neon),
 }), Rotation = 0}, ring:FindFirstChildOfClass("UIStroke"))
-plate = tPanel(new("Frame", {Size = UDim2.fromOffset(34, 34),
-    Position = UDim2.new(0, 9, 0.5, -17), BackgroundColor3 = Theme.panel,
-    BorderSizePixel = 0, ZIndex = 4}, back))
-corner(plate, 17); tAcc(stroke(plate, Theme.accent, 1.4, 0.15))
-flame = new("Frame", {Size = UDim2.fromOffset(14, 14),
-    Position = UDim2.fromScale(0.5, 0.62), AnchorPoint = Vector2.new(0.5, 0.5),
-    BackgroundColor3 = Theme.accent, BorderSizePixel = 0, Rotation = 45, ZIndex = 5}, plate)
-corner(flame, 3); tAcc(flame)
-grad(flame, Color3.fromRGB(215, 175, 255), Color3.fromRGB(120, 40, 200), 90)
-flameTop = new("Frame", {Size = UDim2.fromOffset(7, 7),
-    Position = UDim2.fromScale(0.5, 0.42), AnchorPoint = Vector2.new(0.5, 0.5),
-    BackgroundColor3 = Color3.fromRGB(245, 220, 255), BorderSizePixel = 0, Rotation = 45, ZIndex = 6}, plate)
-corner(flameTop, 2)
-title = new("TextLabel", {Size = UDim2.new(1, -50, 0, 24), Position = UDim2.fromOffset(50, 6),
+
+-- Hexagon shield plate
+plate = new("Frame", {Size = UDim2.fromOffset(36, 36),
+    Position = UDim2.new(0, 10, 0.5, -18), BackgroundColor3 = Theme.panel,
+    BorderSizePixel = 0, ZIndex = 4}, back)
+corner(plate, 4)
+local plateStroke = stroke(plate, Theme.neon, 1.6, 0.1)
+-- Hexagon illusion: rotate 45 and use square corners
+plate.Rotation = 45
+
+-- Inner flame (diamond)
+flame = new("Frame", {Size = UDim2.fromOffset(18, 18),
+    Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
+    BackgroundColor3 = Theme.neon, BorderSizePixel = 0, Rotation = 0, ZIndex = 5}, plate)
+corner(flame, 4)
+grad(flame, Theme.accent3, Theme.neon, 90)
+stroke(flame, Theme.accent2, 1, 0.3)
+
+-- Center pulse
+local flamePulse = new("Frame", {Size = UDim2.fromOffset(8, 8),
+    Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
+    BackgroundColor3 = Color3.fromRGB(255, 245, 255), BorderSizePixel = 0,
+    ZIndex = 6}, plate)
+corner(flamePulse, 4)
+
+-- Title + subtitle (kept at ZIndex above the plate)
+title = new("TextLabel", {Size = UDim2.new(1, -60, 0, 24), Position = UDim2.fromOffset(56, 8),
     BackgroundTransparency = 1, Text = "REAPER", Font = Enum.Font.GothamBlack,
-    TextSize = 16, TextColor3 = Color3.new(1, 1, 1), TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6}, back)
+    TextSize = 17, TextColor3 = Color3.new(1, 1, 1), TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6}, back)
 titleG = new("UIGradient", {Color = ColorSequence.new({
-    ColorSequenceKeypoint.new(0, Color3.fromRGB(215, 175, 255)),
-    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(180, 100, 255)),
-    ColorSequenceKeypoint.new(1, Color3.fromRGB(240, 130, 255)),
+    ColorSequenceKeypoint.new(0, Theme.accent2),
+    ColorSequenceKeypoint.new(0.5, Theme.neon),
+    ColorSequenceKeypoint.new(1, Theme.accent3),
 }), Rotation = 20}, title)
-tAcc(stroke(title, Theme.accent, 1.2, 0.2))
-tMuted(new("TextLabel", {Size = UDim2.new(1, -50, 0, 11), Position = UDim2.fromOffset(51, 30),
+tAcc(stroke(title, Theme.neon, 1.2, 0.2))
+
+tMuted(new("TextLabel", {Size = UDim2.new(1, -60, 0, 11), Position = UDim2.fromOffset(57, 32),
     BackgroundTransparency = 1, Text = "CLICK · X", Font = Enum.Font.GothamBold,
     TextSize = 7, TextColor3 = Theme.muted, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6}, back))
+
+-- Animated outline rotation
 task.spawn(function()
     while ring.Parent do
-        for i = 0, 360, 5 do
+        for i = 0, 360, 4 do
             if not ring.Parent then return end
             ringG.Rotation = i
             RS.RenderStepped:Wait()
         end
     end
 end)
+
+-- Aura breathing
 task.spawn(function()
     while aura.Parent do
-        local t1 = Tween:Create(aura, TweenInfo.new(1.3, Enum.EasingStyle.Sine),
-            {BackgroundTransparency = 0.82, Size = UDim2.fromScale(1.14, 1.26)})
+        local t1 = Tween:Create(aura, TweenInfo.new(1.4, Enum.EasingStyle.Sine),
+            {BackgroundTransparency = 0.8, Size = UDim2.fromScale(1.18, 1.32)})
         t1:Play(); t1.Completed:Wait()
-        local t2 = Tween:Create(aura, TweenInfo.new(1.3, Enum.EasingStyle.Sine),
-            {BackgroundTransparency = 0.58, Size = UDim2.fromScale(1.06, 1.12)})
+        local t2 = Tween:Create(aura, TweenInfo.new(1.4, Enum.EasingStyle.Sine),
+            {BackgroundTransparency = 0.55, Size = UDim2.fromScale(1.08, 1.22)})
         t2:Play(); t2.Completed:Wait()
     end
 end)
+
+-- Plate border pulse
+task.spawn(function()
+    while plate.Parent do
+        if plateStroke and plateStroke.Parent then
+            plateStroke.Transparency = 0.1 + math.sin(tick() * 2.5) * 0.35
+        end
+        RS.RenderStepped:Wait()
+    end
+end)
+
 logo.MouseEnter:Connect(function()
     Tween:Create(backStroke, TweenInfo.new(0.15), {Transparency = 0}):Play()
     pulse(back, 1.03, 0.1)
 end)
 logo.MouseLeave:Connect(function()
-    Tween:Create(backStroke, TweenInfo.new(0.15), {Transparency = 0.2}):Play()
+    Tween:Create(backStroke, TweenInfo.new(0.15), {Transparency = 0.15}):Play()
 end)
 
 --==================== MENU ====================
@@ -2056,8 +2210,9 @@ menu = tBg(new("Frame", {Name = "Menu", Size = UDim2.fromOffset(660, 500),
     Position = UDim2.new(0.5, -330, 0.5, -250), BackgroundColor3 = Theme.bg,
     BorderSizePixel = 0, ClipsDescendants = true, Visible = false, ZIndex = 30}, gui))
 corner(menu, 14)
-menuStroke = tAcc(stroke(menu, Theme.accent, 2, 0.25))
-dropShadow(menu, 14, 18, 0.65)
+menuStroke = tAcc(stroke(menu, Theme.neon, 2, 0.25))
+dropShadow(menu, 14, 18, 0.7)
+
 if Cfg.UI.MenuBlur then
     local blur = new("BlurEffect", {Size = 8, Parent = Lighting})
     task.spawn(function()
@@ -2068,11 +2223,12 @@ if Cfg.UI.MenuBlur then
         blur:Destroy()
     end)
 end
+
 bgGlow = new("Frame", {Size = UDim2.fromScale(1.5, 1.5),
     Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
-    BackgroundColor3 = Theme.accent, BorderSizePixel = 0, BackgroundTransparency = 0.95, ZIndex = 0}, menu)
+    BackgroundColor3 = Theme.neon, BorderSizePixel = 0, BackgroundTransparency = 0.94, ZIndex = 0}, menu)
 corner(bgGlow, 500)
-bgGlowG = new("UIGradient", {Color = ColorSequence.new(Theme.accent, Theme.accent3)}, bgGlow)
+bgGlowG = new("UIGradient", {Color = ColorSequence.new(Theme.neon, Theme.accent3)}, bgGlow)
 task.spawn(function()
     while menu.Parent do
         for r = 0, 360, 3 do
@@ -2082,6 +2238,7 @@ task.spawn(function()
         end
     end
 end)
+
 task.spawn(function()
     while menu.Parent do
         if menuStroke and menuStroke.Parent then
@@ -2090,6 +2247,7 @@ task.spawn(function()
         RS.RenderStepped:Wait()
     end
 end)
+
 ambient = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
     ClipsDescendants = true, ZIndex = 2}, menu)
 ambientParts = {}
@@ -2102,15 +2260,16 @@ function buildAmbient()
         local f = new("Frame", {Size = UDim2.fromOffset(sz, sz),
             Position = UDim2.fromScale(math.random(), math.random()),
             BackgroundColor3 = Theme.accent2,
-            BackgroundTransparency = 0.55 + math.random()*0.3,
+            BackgroundTransparency = 0.55 + math.random() * 0.3,
             BorderSizePixel = 0, ZIndex = 2}, ambient)
         corner(f, sz)
-        ambientParts[#ambientParts+1] = {inst = f,
-            vx = (math.random()-0.5)*0.015, vy = (math.random()-0.5)*0.015,
+        ambientParts[#ambientParts + 1] = {inst = f,
+            vx = (math.random() - 0.5) * 0.015, vy = (math.random() - 0.5) * 0.015,
             phase = math.random() * math.pi * 2}
     end
 end
 buildAmbient()
+
 snowLayer = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
     ClipsDescendants = true, ZIndex = 1}, menu)
 snowflakes = {}
@@ -2122,15 +2281,16 @@ function buildSnow()
         local f = new("Frame", {Size = UDim2.fromOffset(sz, sz),
             Position = UDim2.fromScale(math.random(), math.random()),
             BackgroundColor3 = Color3.fromRGB(240, 248, 255),
-            BackgroundTransparency = 0.15 + math.random()*0.5,
+            BackgroundTransparency = 0.15 + math.random() * 0.5,
             BorderSizePixel = 0, ZIndex = 1}, snowLayer)
         corner(f, sz)
-        snowflakes[#snowflakes+1] = {inst = f,
-            speed = Theme.snow.speed * (0.6 + math.random()*0.8),
-            drift = (math.random()-0.5)*12}
+        snowflakes[#snowflakes + 1] = {inst = f,
+            speed = Theme.snow.speed * (0.6 + math.random() * 0.8),
+            drift = (math.random() - 0.5) * 12}
     end
 end
 buildSnow()
+
 rainLayer = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
     ClipsDescendants = true, ZIndex = 4}, menu)
 rainTrails = {}
@@ -2151,10 +2311,11 @@ function buildRain()
             NumberSequenceKeypoint.new(0.55, 0.7),
             NumberSequenceKeypoint.new(1, 0.05),
         }), Rotation = 90}, trail)
-        rainTrails[#rainTrails+1] = {inst = holder, speed = Theme.rain.speed * (0.7 + math.random()*0.7)}
+        rainTrails[#rainTrails + 1] = {inst = holder, speed = Theme.rain.speed * (0.7 + math.random() * 0.7)}
     end
 end
 buildRain()
+
 sakuraLayer = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
     ClipsDescendants = true, ZIndex = 3}, menu)
 sakuraLeaves = {}
@@ -2175,12 +2336,12 @@ function buildSakura()
             BorderSizePixel = 0, Rotation = math.random() * 360, ZIndex = 3,
         }, sakuraLayer)
         corner(leaf, math.floor(sz))
-        sakuraLeaves[#sakuraLeaves+1] = {inst = leaf,
-            speed = Theme.sakura.leaves.speed * (0.6 + math.random()*0.8),
+        sakuraLeaves[#sakuraLeaves + 1] = {inst = leaf,
+            speed = Theme.sakura.leaves.speed * (0.6 + math.random() * 0.8),
             sway = math.random() * math.pi * 2,
             swaySpeed = 0.6 + math.random() * 1.3,
             swayAmp = Theme.sakura.leaves.sway * (0.5 + math.random()),
-            rot = (math.random()-0.5) * 140}
+            rot = (math.random() - 0.5) * 140}
     end
 end
 buildSakura()
@@ -2189,19 +2350,19 @@ buildSakura()
 header = tPanel2(new("Frame", {Size = UDim2.new(1, 0, 0, 54),
     BackgroundColor3 = Theme.panel2, BorderSizePixel = 0, ZIndex = 31}, menu))
 corner(header, 14)
-grad(header, Color3.fromRGB(48, 26, 82), Color3.fromRGB(7, 5, 16), 90)
+grad(header, Color3.fromRGB(48, 20, 90), Color3.fromRGB(6, 3, 14), 90)
 new("Frame", {Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 1, -2),
-    BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 32}, header)
+    BackgroundColor3 = Theme.neon, BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 32}, header)
 
 tAcc2(new("TextLabel", {Size = UDim2.fromOffset(100, 54), Position = UDim2.fromOffset(14, 0),
     BackgroundTransparency = 1, Text = "REAPER", Font = Enum.Font.GothamBlack,
-    TextSize = 17, TextColor3 = Theme.accent2, TextXAlignment = Enum.TextXAlignment.Left,
+    TextSize = 17, TextColor3 = Theme.neon, TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Center, ZIndex = 32}, header))
 
 local _badgeLbl = new("TextLabel", {Size = UDim2.new(0, 120, 0, 20),
     Position = UDim2.fromOffset(110, 17), BackgroundTransparency = 1,
     Text = "", Font = Enum.Font.GothamBlack, TextSize = 11,
-    TextColor3 = Theme.gold, TextXAlignment = Enum.TextXAlignment.Left,
+    TextColor3 = Theme.neon, TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Center, ZIndex = 32}, header)
 
 local _avSize = 38
@@ -2212,11 +2373,11 @@ local _avImg = new("ImageLabel", {Size = UDim2.fromScale(1, 1),
 corner(_avImg, _avSize / 2)
 local _avLetter = new("TextLabel", {Size = UDim2.fromScale(1, 1),
     BackgroundTransparency = 1, Text = "?", Font = Enum.Font.GothamBlack, TextSize = 16,
-    TextColor3 = Color3.new(1,1,1), ZIndex = 35}, _avWrap)
+    TextColor3 = Color3.new(1, 1, 1), ZIndex = 35}, _avWrap)
 local _avBorder = new("Frame", {Size = UDim2.fromScale(1, 1),
     BackgroundTransparency = 1, ZIndex = 36}, _avWrap)
 corner(_avBorder, _avSize / 2)
-tAcc(stroke(_avBorder, Theme.accent, 1.6, 0.15))
+tAcc(stroke(_avBorder, Theme.neon, 1.6, 0.15))
 
 local _nameLbl = new("TextLabel", {Size = UDim2.new(0, 240, 0, 16),
     Position = UDim2.new(1, -278, 0.5, -19), BackgroundTransparency = 1,
@@ -2247,7 +2408,7 @@ task.spawn(function()
                 end
             end
             if _avLetter.Visible then
-                _avLetter.Text = (MY_USER.displayName or MY_USER.username or "?"):sub(1,1):upper()
+                _avLetter.Text = (MY_USER.displayName or MY_USER.username or "?"):sub(1, 1):upper()
             end
             local flag = flagEmoji(MY_USER.countryCode)
             local elapsed = math.max(0, tick() - (MY_USER.connectedAt or tick()))
@@ -2260,7 +2421,7 @@ task.spawn(function()
             local rank = MY_USER.rank
             local b = rank and BADGE_STYLE[rank]
             if b then
-                _badgeLbl.Text = b.emoji.." "..b.label
+                _badgeLbl.Text = b.emoji .. " " .. b.label
                 _badgeLbl.TextColor3 = b.color
             else
                 _badgeLbl.Text = ""
@@ -2272,7 +2433,7 @@ end)
 
 closeBtn = new("TextButton", {Size = UDim2.fromOffset(24, 24),
     Position = UDim2.new(1, -32, 0, 9), BackgroundColor3 = Theme.danger, Text = "✕",
-    Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = Color3.new(1,1,1),
+    Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = Color3.new(1, 1, 1),
     AutoButtonColor = false, ZIndex = 33}, header)
 corner(closeBtn, 6)
 closeBtn.MouseButton1Click:Connect(function() closeMenu() end)
@@ -2283,8 +2444,8 @@ tickerBar = tPanel(new("Frame", {Size = UDim2.new(1, -20, 0, TICKER_HEIGHT),
     Position = UDim2.fromOffset(10, 60), BackgroundColor3 = Theme.panel,
     BackgroundTransparency = 0.15, BorderSizePixel = 0, ClipsDescendants = true, ZIndex = 31}, menu))
 corner(tickerBar, 8)
-grad(tickerBar, Color3.fromRGB(16, 10, 30), Color3.fromRGB(4, 3, 10), 90)
-tickerStroke = stroke(tickerBar, Theme.tickerColor, 1.4, 0.3)
+grad(tickerBar, Color3.fromRGB(20, 10, 40), Color3.fromRGB(3, 2, 8), 90)
+tickerStroke = stroke(tickerBar, Theme.neon, 1.4, 0.3)
 
 tickerGlow = new("TextLabel", {Size = UDim2.new(0, 0, 1, 0), BackgroundTransparency = 1,
     Text = Theme.ticker, Font = Enum.Font.GothamBlack, TextSize = 15,
@@ -2294,7 +2455,7 @@ tickerLabel = new("TextLabel", {Size = UDim2.new(0, 0, 1, 0), BackgroundTranspar
     Text = Theme.ticker, Font = Enum.Font.GothamBlack, TextSize = 13,
     TextColor3 = Theme.tickerColor,
     TextStrokeTransparency = 0.35,
-    TextStrokeColor3 = Color3.fromRGB(4, 3, 10),
+    TextStrokeColor3 = Color3.fromRGB(3, 2, 8),
     TextXAlignment = Enum.TextXAlignment.Left, AutomaticSize = Enum.AutomaticSize.X, ZIndex = 34}, tickerBar)
 tickerLabelGrad = new("UIGradient", {Color = ColorSequence.new({
     ColorSequenceKeypoint.new(0, Theme.tickerColor),
@@ -2328,15 +2489,18 @@ rail = tPanel(new("Frame", {Size = UDim2.new(0, 120, 1, -130),
 corner(rail, 10)
 new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, rail)
 new("UIPadding", {PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5)}, rail)
+
 tabIndicator = new("Frame", {Size = UDim2.new(1, -10, 0, 26),
-    Position = UDim2.fromOffset(5, 6), BackgroundColor3 = Theme.accent,
+    Position = UDim2.fromOffset(5, 6), BackgroundColor3 = Theme.neon,
     BackgroundTransparency = 0.82, BorderSizePixel = 0, ZIndex = 31}, rail)
 corner(tabIndicator, 6)
-new("UIGradient", {Color = ColorSequence.new(Theme.accent, Theme.accent3)}, tabIndicator)
+new("UIGradient", {Color = ColorSequence.new(Theme.neon, Theme.accent3)}, tabIndicator)
+
 content = tPanel(new("Frame", {Size = UDim2.new(1, -148, 1, -130),
     Position = UDim2.fromOffset(138, 96), BackgroundColor3 = Theme.panel,
     BackgroundTransparency = 0.05, BorderSizePixel = 0, ZIndex = 31}, menu))
 corner(content, 10)
+
 status = tPanel(new("Frame", {Size = UDim2.new(1, -20, 0, 20),
     Position = UDim2.new(0, 10, 1, -25), BackgroundColor3 = Theme.panel,
     BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 31}, menu))
@@ -2390,9 +2554,9 @@ function makeTab(id, title)
     corner(tab, 7)
     tStroke(stroke(tab, Theme.strokeSoft, 1, 0.5))
     tabs[id] = tab
-    local page = new("ScrollingFrame", {Name = "Page_"..id, Size = UDim2.fromScale(1, 1),
+    local page = new("ScrollingFrame", {Name = "Page_" .. id, Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
-        ScrollBarImageColor3 = Theme.accent, CanvasSize = UDim2.new(0, 0, 0, 0),
+        ScrollBarImageColor3 = Theme.neon, CanvasSize = UDim2.new(0, 0, 0, 0),
         AutomaticCanvasSize = Enum.AutomaticSize.Y, Visible = false, ZIndex = 32}, content)
     new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, page)
     new("UIPadding", {PaddingTop = UDim.new(0, 10), PaddingLeft = UDim.new(0, 10),
@@ -2406,21 +2570,21 @@ function makeTab(id, title)
             t.BackgroundColor3 = Theme.panel2
         end
         tab.TextColor3 = Color3.new(1, 1, 1)
-        tab.BackgroundColor3 = Theme.accent
+        tab.BackgroundColor3 = Theme.neon
         glow(tab, Theme.accent2, 0.4)
         shine(tab, Color3.new(1, 1, 1), 0.5)
         local ty = tab.AbsolutePosition.Y - rail.AbsolutePosition.Y
         Tween:Create(tabIndicator, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
             {Position = UDim2.fromOffset(5, ty)}):Play()
-        ripple(tab, tab.AbsoluteSize.X/2, tab.AbsoluteSize.Y/2, Theme.accent2, 18, 0.5)
+        ripple(tab, tab.AbsoluteSize.X / 2, tab.AbsoluteSize.Y / 2, Theme.accent2, 18, 0.5)
     end)
     tab.MouseEnter:Connect(function()
-        if tab.BackgroundColor3 ~= Theme.accent then
+        if tab.BackgroundColor3 ~= Theme.neon then
             Tween:Create(tab, TweenInfo.new(0.15), {BackgroundColor3 = Theme.panel3}):Play()
         end
     end)
     tab.MouseLeave:Connect(function()
-        if tab.BackgroundColor3 ~= Theme.accent then
+        if tab.BackgroundColor3 ~= Theme.neon then
             Tween:Create(tab, TweenInfo.new(0.15), {BackgroundColor3 = Theme.panel2}):Play()
         end
     end)
@@ -2434,12 +2598,12 @@ function section(pageId, title, icon)
         LayoutOrder = #page:GetChildren(), ZIndex = 33}, page))
     corner(wrap, 7)
     tStroke(stroke(wrap, Theme.strokeSoft, 1, 0.5))
-    local hg = grad(wrap, Color3.fromRGB(90, 48, 150), Theme.panel2, 0)
+    local hg = grad(wrap, Color3.fromRGB(110, 50, 190), Theme.panel2, 0)
     new("Frame", {Size = UDim2.new(0, 3, 0.6, 0), Position = UDim2.new(0, 0, 0.5, 0),
-        AnchorPoint = Vector2.new(0, 0.5), BackgroundColor3 = Theme.accent,
+        AnchorPoint = Vector2.new(0, 0.5), BackgroundColor3 = Theme.neon,
         BorderSizePixel = 0, ZIndex = 35}, wrap)
     new("TextLabel", {Size = UDim2.new(1, -14, 1, 0), Position = UDim2.fromOffset(12, 0),
-        BackgroundTransparency = 1, Text = (icon and icon.."  " or "")..title,
+        BackgroundTransparency = 1, Text = (icon and icon .. "  " or "") .. title,
         Font = Enum.Font.GothamBlack, TextSize = 10, TextColor3 = Theme.accent2,
         TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 34}, wrap)
     if Cfg.UI.ShimmerHeaders then
@@ -2464,7 +2628,7 @@ function collapsible(pageId, title, open)
         AutoButtonColor = false, LayoutOrder = #page:GetChildren(), ZIndex = 33}, page))
     corner(hdr, 7)
     tStroke(stroke(hdr, Theme.strokeSoft, 1, 0.5))
-    grad(hdr, Color3.fromRGB(90, 48, 150), Theme.panel2, 0)
+    grad(hdr, Color3.fromRGB(110, 50, 190), Theme.panel2, 0)
     local arrow = new("TextLabel", {Size = UDim2.fromOffset(18, 24), Position = UDim2.fromOffset(8, 0),
         BackgroundTransparency = 1, Text = state and "▼" or "▶",
         Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = Theme.accent2, ZIndex = 34}, hdr)
@@ -2496,7 +2660,7 @@ function toggleRow(pageId, path, label, onChange)
         LayoutOrder = #page:GetChildren(), ZIndex = 33}, page))
     corner(row, 7)
     tStroke(stroke(row, Theme.strokeSoft, 1, 0.55))
-    hoverStripe(row, Theme.accent)
+    hoverStripe(row, Theme.neon)
     new("TextLabel", {Size = UDim2.new(1, -200, 1, 0), Position = UDim2.fromOffset(14, 0),
         BackgroundTransparency = 1, Text = label, Font = Enum.Font.Gotham, TextSize = 11,
         TextColor3 = Theme.text, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 36}, row)
@@ -2524,7 +2688,7 @@ function toggleRow(pageId, path, label, onChange)
     end)
     local track = new("Frame", {Size = UDim2.fromOffset(42, 20),
         Position = UDim2.new(1, -50, 0.5, -10),
-        BackgroundColor3 = state and Theme.accent or Theme.panel2,
+        BackgroundColor3 = state and Theme.neon or Theme.panel2,
         BorderSizePixel = 0, ZIndex = 36}, row)
     corner(track, 10)
     tStroke(stroke(track, Theme.strokeSoft, 1, 0.4))
@@ -2532,10 +2696,10 @@ function toggleRow(pageId, path, label, onChange)
         Position = state and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7),
         BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 37}, track)
     corner(thumb, 7)
-    tAcc(stroke(thumb, Theme.accent, 1.4, 0.2))
+    tAcc(stroke(thumb, Theme.neon, 1.4, 0.2))
     local function render()
         if state then
-            track.BackgroundColor3 = Theme.accent
+            track.BackgroundColor3 = Theme.neon
             thumb.Position = UDim2.new(1, -17, 0.5, -7)
         else
             track.BackgroundColor3 = Theme.panel2
@@ -2576,7 +2740,6 @@ function toggleRow(pageId, path, label, onChange)
             pulse(thumb, 1.4, 0.08)
             flash(track, state and Theme.danger or Theme.success, 0.12)
             glow(track, state and Theme.danger or Theme.success, 0.4)
-            ripple(track, 21, 10, state and Theme.danger or Theme.success, 18, 0.5)
         end
     end)
 end
@@ -2591,7 +2754,7 @@ function sliderRow(pageId, path, label, mn, mx, dec, onChange)
         LayoutOrder = #page:GetChildren(), ZIndex = 33}, page))
     corner(row, 7)
     tStroke(stroke(row, Theme.strokeSoft, 1, 0.55))
-    hoverStripe(row, Theme.accent)
+    hoverStripe(row, Theme.neon)
     new("TextLabel", {Size = UDim2.new(1, -90, 0, 14), Position = UDim2.fromOffset(14, 4),
         BackgroundTransparency = 1, Text = label, Font = Enum.Font.Gotham, TextSize = 11,
         TextColor3 = Theme.text, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 36}, row)
@@ -2604,15 +2767,15 @@ function sliderRow(pageId, path, label, mn, mx, dec, onChange)
     corner(bar, 3)
     tStroke(stroke(bar, Theme.strokeSoft, 1, 0.5))
     local fill = new("Frame", {Size = UDim2.new(0, 0, 1, 0),
-        BackgroundColor3 = Theme.accent, BorderSizePixel = 0, ZIndex = 35}, bar)
+        BackgroundColor3 = Theme.neon, BorderSizePixel = 0, ZIndex = 35}, bar)
     corner(fill, 3); tAcc(fill)
-    grad(fill, Theme.accent, Theme.accent3, 0)
+    grad(fill, Theme.neon, Theme.accent3, 0)
     local thumb = new("Frame", {Size = UDim2.fromOffset(12, 12),
         Position = UDim2.new(0, 0, 0.5, 0), AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0, ZIndex = 36}, bar)
     corner(thumb, 6)
-    tAcc(stroke(thumb, Theme.accent, 1.5))
-    local mult = 10^dec
+    tAcc(stroke(thumb, Theme.neon, 1.5))
+    local mult = 10 ^ dec
     local value = cur
     local function setVal(v, fire)
         value = v
@@ -2620,7 +2783,7 @@ function sliderRow(pageId, path, label, mn, mx, dec, onChange)
         local a = math.clamp((v - mn) / (mx - mn), 0, 1)
         fill.Size = UDim2.new(a, 0, 1, 0)
         thumb.Position = UDim2.new(a, 0, 0.5, 0)
-        valLbl.Text = string.format("%."..dec.."f", v)
+        valLbl.Text = string.format("%." .. dec .. "f", v)
         if fire ~= false and onChange then pcall(onChange, v) end
     end
     widgets[path] = {set = setVal, get = function() return value end}
@@ -2635,7 +2798,6 @@ function sliderRow(pageId, path, label, mn, mx, dec, onChange)
             drag = true
             fromX(i.Position.X)
             pulse(thumb, 1.5, 0.1)
-            ripple(bar, bar.AbsoluteSize.X/2, 2, Theme.accent, 12, 0.4)
         end
     end)
     UIS.InputChanged:Connect(function(i)
@@ -2645,7 +2807,6 @@ function sliderRow(pageId, path, label, mn, mx, dec, onChange)
     end)
     UIS.InputEnded:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-            if drag then pulse(thumb, 1.15, 0.08) end
             drag = false
         end
     end)
@@ -2659,7 +2820,7 @@ function buttonRow(pageId, label, text, cb)
         LayoutOrder = #page:GetChildren(), ZIndex = 33}, page))
     corner(row, 7)
     tStroke(stroke(row, Theme.strokeSoft, 1, 0.55))
-    hoverStripe(row, Theme.accent)
+    hoverStripe(row, Theme.neon)
     new("TextLabel", {Size = UDim2.new(1, -160, 1, 0), Position = UDim2.fromOffset(14, 0),
         BackgroundTransparency = 1, Text = label, Font = Enum.Font.Gotham, TextSize = 11,
         TextColor3 = Theme.text, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 36}, row)
@@ -2672,7 +2833,6 @@ function buttonRow(pageId, label, text, cb)
     b.MouseButton1Click:Connect(function()
         pulse(b, 0.94, 0.06)
         glow(b, Theme.accent2, 0.35)
-        ripple(b, b.AbsoluteSize.X/2, b.AbsoluteSize.Y/2, Theme.accent, 16, 0.45)
         shine(b, Theme.accent2, 0.5)
         cb(b)
     end)
@@ -2683,6 +2843,20 @@ function buttonRow(pageId, label, text, cb)
         Tween:Create(b, TweenInfo.new(0.15), {BackgroundColor3 = Theme.panel2}):Play()
     end)
     return b
+end
+
+function infoRow(pageId, text)
+    local page = resolvePage(pageId)
+    if not page then return nil end
+    local row = tPanel2(new("Frame", {Size = UDim2.new(1, 0, 0, 24),
+        BackgroundColor3 = Theme.panel2, BackgroundTransparency = 0.2,
+        LayoutOrder = #page:GetChildren(), ZIndex = 33}, page))
+    corner(row, 6)
+    tStroke(stroke(row, Theme.strokeSoft, 1, 0.5))
+    local lbl = new("TextLabel", {Size = UDim2.new(1, -10, 1, 0), Position = UDim2.fromOffset(12, 0),
+        BackgroundTransparency = 1, Text = text or "", Font = Enum.Font.Code, TextSize = 10,
+        TextColor3 = Theme.accent2, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 34}, row)
+    return lbl
 end
 
 function textRow(pageId, label, ph, initial, onCommit)
@@ -2716,7 +2890,7 @@ function cycleRow(pageId, path, label, options, onChange)
         LayoutOrder = #page:GetChildren(), ZIndex = 33}, page))
     corner(row, 7)
     tStroke(stroke(row, Theme.strokeSoft, 1, 0.55))
-    hoverStripe(row, Theme.accent)
+    hoverStripe(row, Theme.neon)
     new("TextLabel", {Size = UDim2.new(1, -160, 1, 0), Position = UDim2.fromOffset(14, 0),
         BackgroundTransparency = 1, Text = label, Font = Enum.Font.Gotham, TextSize = 11,
         TextColor3 = Theme.text, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 36}, row)
@@ -2735,45 +2909,11 @@ function cycleRow(pageId, path, label, options, onChange)
         setPath(Cfg, path, options[idx])
         b.Text = tostring(options[idx])
         pulse(b, 0.94, 0.06)
-        glow(b, Theme.accent2, 0.35)
-        ripple(b, b.AbsoluteSize.X/2, b.AbsoluteSize.Y/2, Theme.accent, 16, 0.4)
         if onChange then pcall(onChange, options[idx]) end
     end)
     widgets[path] = {set = function(v) setPath(Cfg, path, v); b.Text = tostring(v) end,
         get = function() return getPath(Cfg, path) end}
     return b
-end
-
-function infoRow(pageId, text)
-    local page = resolvePage(pageId)
-    if not page then return nil end
-    local row = tPanel2(new("Frame", {Size = UDim2.new(1, 0, 0, 24),
-        BackgroundColor3 = Theme.panel2, BackgroundTransparency = 0.2,
-        LayoutOrder = #page:GetChildren(), ZIndex = 33}, page))
-    corner(row, 6)
-    tStroke(stroke(row, Theme.strokeSoft, 1, 0.5))
-    local lbl = new("TextLabel", {Size = UDim2.new(1, -10, 1, 0), Position = UDim2.fromOffset(12, 0),
-        BackgroundTransparency = 1, Text = text or "", Font = Enum.Font.Code, TextSize = 10,
-        TextColor3 = Theme.accent2, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 34}, row)
-    return lbl
-end
-
-function legendRow(pageId, label, col)
-    local page = resolvePage(pageId)
-    if not page then return end
-    local row = tPanel(new("Frame", {Size = UDim2.new(1, 0, 0, 26),
-        BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.15,
-        LayoutOrder = #page:GetChildren(), ZIndex = 33}, page))
-    corner(row, 7)
-    tStroke(stroke(row, Theme.strokeSoft, 1, 0.55))
-    local sw = new("Frame", {Size = UDim2.fromOffset(26, 14), Position = UDim2.fromOffset(12, 6),
-        BackgroundColor3 = col, BorderSizePixel = 0, ZIndex = 34}, row)
-    corner(sw, 4)
-    stroke(sw, col, 1, 0)
-    new("TextLabel", {Size = UDim2.new(1, -46, 1, 0), Position = UDim2.fromOffset(46, 0),
-        BackgroundTransparency = 1, Text = label, Font = Enum.Font.GothamBold,
-        TextSize = 10, TextColor3 = col, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 34}, row)
-    return row
 end
 
 --==================== THEME / OPACITY ====================
@@ -2806,8 +2946,8 @@ function applyTheme()
         if d:GetAttribute("T_Panel") and (d:IsA("Frame") or d:IsA("ScrollingFrame")) then d.BackgroundColor3 = Theme.panel end
         if d:GetAttribute("T_Panel2") and (d:IsA("Frame") or d:IsA("TextBox")) then d.BackgroundColor3 = Theme.panel2 end
         if d:GetAttribute("T_Acc") then
-            if d:IsA("UIStroke") then d.Color = Theme.accent
-            elseif d:IsA("Frame") or d:IsA("TextButton") then d.BackgroundColor3 = Theme.accent end
+            if d:IsA("UIStroke") then d.Color = Theme.neon
+            elseif d:IsA("Frame") or d:IsA("TextButton") then d.BackgroundColor3 = Theme.neon end
         end
         if d:GetAttribute("T_Acc2") and d:IsA("TextLabel") then d.TextColor3 = Theme.accent2 end
         if d:GetAttribute("T_Text") and d:IsA("TextLabel") then d.TextColor3 = Theme.text end
@@ -2816,7 +2956,7 @@ function applyTheme()
     end
     tickerLabel.TextColor3 = Theme.tickerColor
     tickerGlow.TextColor3 = Theme.tickerColor
-    tickerStroke.Color = Theme.tickerColor
+    tickerStroke.Color = Theme.neon
     if tickerLabelGrad then
         tickerLabelGrad.Color = ColorSequence.new({
             ColorSequenceKeypoint.new(0, Theme.tickerColor),
@@ -2838,12 +2978,12 @@ hudFrame = tBg(new("Frame", {Name = "HudRoot", Size = UDim2.fromOffset(220, 40),
     BackgroundTransparency = 0.12, BorderSizePixel = 0,
     AutomaticSize = Enum.AutomaticSize.Y, Visible = false, ClipsDescendants = true}, hudGui))
 corner(hudFrame, 10)
-tAcc(stroke(hudFrame, Theme.accent, 1.5, 0.3))
+tAcc(stroke(hudFrame, Theme.neon, 1.5, 0.3))
 grad(hudFrame, Theme.panel, Theme.bg, 90)
 hudHeader = tPanel2(new("Frame", {Size = UDim2.new(1, 0, 0, 22),
     BackgroundColor3 = Theme.panel2, BackgroundTransparency = 0.1, BorderSizePixel = 0}, hudFrame))
 corner(hudHeader, 10)
-grad(hudHeader, Color3.fromRGB(48, 26, 82), Color3.fromRGB(7, 5, 16), 90)
+grad(hudHeader, Color3.fromRGB(48, 20, 90), Color3.fromRGB(6, 3, 14), 90)
 tAcc2(new("TextLabel", {Size = UDim2.new(1, -46, 1, 0), Position = UDim2.fromOffset(10, 0),
     BackgroundTransparency = 1, Text = "⚡ KEYBINDS", Font = Enum.Font.GothamBlack,
     TextSize = 10, TextColor3 = Theme.accent2, TextXAlignment = Enum.TextXAlignment.Left}, hudHeader))
@@ -2876,7 +3016,7 @@ refreshHUD = function()
     end
     local keys = {}
     for path, k in pairs(Cfg.Binds or {}) do
-        if k and widgets[path] then keys[#keys+1] = {path = path, key = k} end
+        if k and widgets[path] then keys[#keys + 1] = {path = path, key = k} end
     end
     table.sort(keys, function(a, b) return a.path < b.path end)
     if #keys == 0 then hudEmpty.Visible = true; return end
@@ -2896,7 +3036,7 @@ refreshHUD = function()
             TextColor3 = on and Theme.success or Theme.muted,
             TextXAlignment = Enum.TextXAlignment.Left}, row)
         new("TextLabel", {Size = UDim2.fromOffset(60, 18), Position = UDim2.new(1, -62, 0, 0),
-            BackgroundTransparency = 1, Text = "["..e.key.Name.."]",
+            BackgroundTransparency = 1, Text = "[" .. e.key.Name .. "]",
             Font = Enum.Font.GothamBold, TextSize = 9,
             TextColor3 = on and Theme.accent2 or Theme.muted,
             TextXAlignment = Enum.TextXAlignment.Right}, row)
@@ -2911,12 +3051,12 @@ adFrame = tBg(new("Frame", {Name = "ADRoot", Size = UDim2.fromOffset(240, 40),
     BackgroundTransparency = 0.12, BorderSizePixel = 0,
     AutomaticSize = Enum.AutomaticSize.Y, Visible = false, ClipsDescendants = true}, adGui))
 corner(adFrame, 10)
-tAcc(stroke(adFrame, Theme.accent, 1.5, 0.3))
+tAcc(stroke(adFrame, Theme.neon, 1.5, 0.3))
 grad(adFrame, Theme.panel, Theme.bg, 90)
 adHeader = tPanel2(new("Frame", {Size = UDim2.new(1, 0, 0, 22),
     BackgroundColor3 = Theme.panel2, BackgroundTransparency = 0.1, BorderSizePixel = 0}, adFrame))
 corner(adHeader, 10)
-grad(adHeader, Color3.fromRGB(48, 26, 82), Color3.fromRGB(7, 5, 16), 90)
+grad(adHeader, Color3.fromRGB(48, 20, 90), Color3.fromRGB(6, 3, 14), 90)
 tAcc2(new("TextLabel", {Size = UDim2.new(1, -70, 1, 0), Position = UDim2.fromOffset(10, 0),
     BackgroundTransparency = 1, Text = "⚙ AUTO-DETECT", Font = Enum.Font.GothamBlack,
     TextSize = 10, TextColor3 = Theme.accent2, TextXAlignment = Enum.TextXAlignment.Left}, adHeader))
@@ -3001,6 +3141,157 @@ if isMod() then
 end
 for _, id in ipairs(tabOrder) do makeTab(id, tabTitles[id]) end
 
+--==================== CHAT MODERATION HELPERS ====================
+-- Shared by HOME inline buttons and OWNER tab
+function doModBan(targetDiscordId, reason, duration, onDone)
+    if not targetDiscordId or targetDiscordId == "" then
+        notify("Ban", "No Discord ID on this message", Theme.gold, 3); return
+    end
+    task.spawn(function()
+        local body = HttpService:JSONEncode({
+            robloxId = tostring(LP.UserId), key = SESSION_KEY or "",
+            targetDiscordId = tostring(targetDiscordId),
+            reason = reason or "", duration = duration or 0,
+        })
+        local ok, res = httpPost(KEY_API .. "/chat/ban", body)
+        if ok then
+            local durTxt = (duration and duration > 0) and ("for " .. tostring(math.floor(duration / 60)) .. "m") or "permanently"
+            notify("Banned", tostring(targetDiscordId) .. " " .. durTxt, Theme.success, 3)
+            if onDone then pcall(onDone) end
+        else
+            local pretty = parseErrorReason(res)
+            notify("Ban failed", pretty, Theme.danger, 8, pretty)
+        end
+    end)
+end
+
+function doModDelete(msgId, onDone)
+    if not msgId then return end
+    task.spawn(function()
+        local body = HttpService:JSONEncode({
+            robloxId = tostring(LP.UserId), key = SESSION_KEY or "",
+            messageId = msgId,
+        })
+        local ok, res = httpPost(KEY_API .. "/chat/delete", body)
+        if ok then
+            -- reflect locally on every client
+            for _, fn in ipairs(Chat.listeners) do
+                if fn and type(fn) == "function" then
+                    pcall(fn, {__deleteMsgId = msgId})
+                end
+            end
+            notify("Deleted", "message #" .. tostring(msgId), Theme.success, 2.5)
+            if onDone then pcall(onDone) end
+        else
+            local pretty = parseErrorReason(res)
+            notify("Delete failed", pretty, Theme.danger, 8, pretty)
+        end
+    end)
+end
+
+--==================== QUICK-MOD POPUP ====================
+local function openQuickMod(target)
+    -- target = { userId, discordId, name, msgId }
+    if not isMod() then return end
+    if not target or not target.discordId then
+        notify("Mod", "No Discord ID available for this user", Theme.gold, 3); return
+    end
+
+    local existing = pg:FindFirstChild("ReaperQuickMod")
+    if existing then existing:Destroy() end
+
+    local qm = new("ScreenGui", {Name = "ReaperQuickMod", ResetOnSpawn = false,
+        IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 10050}, pg)
+
+    -- click-away catcher
+    local catcher = new("TextButton", {Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.65,
+        Text = "", AutoButtonColor = false, ZIndex = 1}, qm)
+    catcher.MouseButton1Click:Connect(function() qm:Destroy() end)
+
+    local cardW, cardH = 340, 320
+    local mx, my = UIS:GetMouseLocation()
+    local card = new("Frame", {Size = UDim2.fromOffset(cardW, cardH),
+        Position = UDim2.fromOffset(
+            math.clamp(mx - cardW / 2, 20, Cam.ViewportSize.X - cardW - 20),
+            math.clamp(my - 40, 20, Cam.ViewportSize.Y - cardH - 20)),
+        BackgroundColor3 = Theme.bg, BorderSizePixel = 0, ZIndex = 2}, qm)
+    corner(card, 14)
+    grad(card, Color3.fromRGB(20, 10, 40), Theme.bgDeep, 90)
+    local st = stroke(card, Theme.neon, 2, 0.15)
+    dropShadow(card, 14, 16, 0.7)
+
+    new("Frame", {Size = UDim2.new(1, 0, 0, 3), BackgroundColor3 = Theme.neon,
+        BorderSizePixel = 0, ZIndex = 3}, card)
+
+    new("TextLabel", {Size = UDim2.new(1, -20, 0, 20), Position = UDim2.fromOffset(14, 12),
+        BackgroundTransparency = 1, Text = "MODERATION", Font = Enum.Font.GothamBlack,
+        TextSize = 12, TextColor3 = Theme.neon, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4}, card)
+    new("TextLabel", {Size = UDim2.new(1, -20, 0, 15), Position = UDim2.fromOffset(14, 32),
+        BackgroundTransparency = 1, Text = "@" .. tostring(target.name or "?"),
+        Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.muted,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4}, card)
+    new("TextLabel", {Size = UDim2.new(1, -20, 0, 15), Position = UDim2.fromOffset(14, 48),
+        BackgroundTransparency = 1, Text = "discord: " .. tostring(target.discordId),
+        Font = Enum.Font.Code, TextSize = 9, TextColor3 = Theme.accent2,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4}, card)
+
+    -- Shared reason textbox
+    local reasonBox = tPanel2(new("TextBox", {Size = UDim2.new(1, -28, 0, 26),
+        Position = UDim2.fromOffset(14, 70), BackgroundColor3 = Theme.panel2,
+        Text = "", PlaceholderText = "reason (optional)", PlaceholderColor3 = Theme.muted,
+        Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.text,
+        ClearTextOnFocus = false, Active = true, Selectable = true, ZIndex = 50}, card))
+    corner(reasonBox, 6)
+    tStroke(stroke(reasonBox, Theme.strokeSoft, 1))
+
+    -- Row builder for button lists
+    local function mkBtn(y, label, col, cb)
+        local b = new("TextButton", {Size = UDim2.new(1, -28, 0, 26),
+            Position = UDim2.fromOffset(14, y), BackgroundColor3 = Theme.panel2,
+            Text = label, Font = Enum.Font.GothamBold, TextSize = 10,
+            TextColor3 = col, AutoButtonColor = false, ZIndex = 5}, card)
+        corner(b, 6)
+        local bs = stroke(b, Theme.strokeSoft, 1)
+        b.MouseEnter:Connect(function()
+            Tween:Create(b, TweenInfo.new(0.12), {BackgroundColor3 = Theme.panel3}):Play()
+            bs.Color = col
+            bs.Transparency = 0
+        end)
+        b.MouseLeave:Connect(function()
+            Tween:Create(b, TweenInfo.new(0.15), {BackgroundColor3 = Theme.panel2}):Play()
+            bs.Color = Theme.strokeSoft
+            bs.Transparency = 0
+        end)
+        b.MouseButton1Click:Connect(function()
+            cb()
+            qm:Destroy()
+        end)
+        return b
+    end
+
+    mkBtn(104, "⏱  Timeout 5 min", Theme.gold, function()
+        doModBan(target.discordId, reasonBox.Text, 300)
+    end)
+    mkBtn(134, "⏱  Timeout 1 hour", Theme.gold, function()
+        doModBan(target.discordId, reasonBox.Text, 3600)
+    end)
+    mkBtn(164, "⏱  Timeout 24 hours", Theme.gold, function()
+        doModBan(target.discordId, reasonBox.Text, 86400)
+    end)
+    mkBtn(194, "🔨  Ban permanently", Theme.danger, function()
+        doModBan(target.discordId, reasonBox.Text, 0)
+    end)
+
+    if target.msgId then
+        mkBtn(224, "🗑  Delete this message", Theme.danger, function()
+            doModDelete(target.msgId)
+        end)
+    end
+
+    mkBtn(254, "✕  Cancel", Theme.muted, function() end)
+end
+
 --====================== HOME ======================
 do
     local pg2 = "home"
@@ -3019,21 +3310,22 @@ do
         TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
 
-    local chatHolder = tPanel(new("Frame", {Size = UDim2.new(1, 0, 0, 260),
+    local chatHolder = tPanel(new("Frame", {Size = UDim2.new(1, 0, 0, 300),
         BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.1,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2]))
     corner(chatHolder, 10)
     tStroke(stroke(chatHolder, Theme.strokeSoft, 1, 0.4))
+
     local chatScroll = new("ScrollingFrame", {Size = UDim2.new(1, -8, 1, -66),
         Position = UDim2.fromOffset(4, 4), BackgroundTransparency = 1, BorderSizePixel = 0,
-        ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.accent,
+        ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.neon,
         CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
         ZIndex = 34}, chatHolder)
     new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, chatScroll)
     new("UIPadding", {PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4),
         PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, chatScroll)
 
-    local userBar = tPanel2(new("Frame", {Size = UDim2.new(1, -8, 0, 16),
+    local userBar = tPanel2(new("Frame", {Size = UDim2.new(1, -8, 0, 18),
         Position = UDim2.new(0, 4, 1, -58), BackgroundColor3 = Theme.panel2,
         BackgroundTransparency = 0.3, BorderSizePixel = 0, ZIndex = 34}, chatHolder))
     corner(userBar, 4)
@@ -3065,7 +3357,7 @@ do
         Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.text, Text = "",
         ClearTextOnFocus = false, ZIndex = 51}, inputBar)
     local sendBtn = new("TextButton", {Size = UDim2.fromOffset(54, 20),
-        Position = UDim2.new(1, -58, 0.5, -10), BackgroundColor3 = Theme.accent, Text = "SEND",
+        Position = UDim2.new(1, -58, 0.5, -10), BackgroundColor3 = Theme.neon, Text = "SEND",
         Font = Enum.Font.GothamBold, TextSize = 9, TextColor3 = Color3.new(1, 1, 1),
         AutoButtonColor = false, ZIndex = 51}, inputBar)
     corner(sendBtn, 5)
@@ -3073,6 +3365,7 @@ do
     local chatRowsById = {}
 
     local function addRow(e)
+        -- delete signal from server/owner
         if type(e) == "table" and e.__deleteMsgId then
             local target = chatRowsById[e.__deleteMsgId]
             if target and target.row and target.row.Parent then
@@ -3082,23 +3375,28 @@ do
             return
         end
         if not chatScroll.Parent then return end
-        local row = new("Frame", {Size = UDim2.new(1, 0, 0, 38), BackgroundTransparency = 1,
+
+        -- Row container. We use a vertical layout: header + body + optional hover tray.
+        local row = new("Frame", {Size = UDim2.new(1, 0, 0, 42), BackgroundTransparency = 1,
             LayoutOrder = (#chatScroll:GetChildren()) + 1, ZIndex = 35,
             AutomaticSize = Enum.AutomaticSize.Y}, chatScroll)
-        local avWrap = new("Frame", {Size = UDim2.fromOffset(30, 30),
-            Position = UDim2.fromOffset(0, 2), BackgroundTransparency = 1, ZIndex = 36}, row)
+
+        -- Avatar (clickable for mods)
+        local avWrap = new("TextButton", {Size = UDim2.fromOffset(30, 30),
+            Position = UDim2.fromOffset(0, 2), BackgroundTransparency = 1,
+            Text = "", AutoButtonColor = false, ZIndex = 36}, row)
         local avImg = new("ImageLabel", {Size = UDim2.fromScale(1, 1),
             BackgroundColor3 = Theme.panel2, BorderSizePixel = 0, Image = "", ZIndex = 36}, avWrap)
         corner(avImg, 15)
         local avLetter = new("TextLabel", {Size = UDim2.fromScale(1, 1),
-            BackgroundTransparency = 1, Text = (e.sender or "?"):sub(1,1):upper(),
-            Font = Enum.Font.GothamBlack, TextSize = 13, TextColor3 = Color3.new(1,1,1),
+            BackgroundTransparency = 1, Text = (e.sender or "?"):sub(1, 1):upper(),
+            Font = Enum.Font.GothamBlack, TextSize = 13, TextColor3 = Color3.new(1, 1, 1),
             ZIndex = 37}, avWrap)
         local avBorder = new("Frame", {Size = UDim2.fromScale(1, 1),
             BackgroundTransparency = 1, ZIndex = 38}, avWrap)
         corner(avBorder, 15)
         local senderRank = e.userId and getRankFor(e.userId)
-        local ringCol = e.col or Theme.accent
+        local ringCol = e.col or Theme.neon
         if senderRank and BADGE_STYLE[senderRank] then ringCol = BADGE_STYLE[senderRank].color end
         stroke(avBorder, ringCol, senderRank and 2 or 1.4, 0.15)
 
@@ -3113,6 +3411,26 @@ do
             end)
         end
 
+        -- Mod click on avatar
+        if isMod() then
+            avWrap.MouseEnter:Connect(function()
+                Tween:Create(avBorder, TweenInfo.new(0.12), {}):Play()
+                avBorder.BackgroundColor3 = Color3.new(1, 1, 1)
+                avBorder.BackgroundTransparency = 0.7
+            end)
+            avWrap.MouseLeave:Connect(function()
+                avBorder.BackgroundTransparency = 1
+            end)
+            avWrap.MouseButton1Click:Connect(function()
+                openQuickMod({
+                    userId = e.userId, discordId = e.discordId,
+                    name = (e.discordName and e.discordName ~= "" and ("@" .. e.discordName)) or e.sender,
+                    msgId = e.msgId,
+                })
+            end)
+        end
+
+        -- Header + body
         local textHolder = new("Frame", {Size = UDim2.new(1, -38, 0, 0),
             Position = UDim2.fromOffset(38, 0), BackgroundTransparency = 1,
             AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 36}, row)
@@ -3122,17 +3440,15 @@ do
             local b = BADGE_STYLE[senderRank]
             badgePrefix = string.format('<font color="#%s">%s %s</font>  ', b.color:ToHex(), b.emoji, b.label)
         end
-
         local placeTag = ""
         if e.placeId and e.placeId ~= "" and tostring(e.placeId) ~= tostring(game.PlaceId) then
             placeTag = string.format('  <font color="#6E82B6">[place %s]</font>', tostring(e.placeId))
         end
-
         local headTxt = string.format('<font color="#8FA6BE">%s</font>  %s<font color="#%s"><b>%s</b></font>%s',
             os.date("%H:%M", math.floor(e.time or tick())),
             badgePrefix,
             (e.col or Color3.fromRGB(148, 204, 255)):ToHex(),
-            (e.discordName and e.discordName ~= "" and ("@"..e.discordName)) or e.sender,
+            (e.discordName and e.discordName ~= "" and ("@" .. e.discordName)) or e.sender,
             placeTag)
         new("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
             RichText = true, Font = Enum.Font.GothamBold, TextSize = 9,
@@ -3143,6 +3459,42 @@ do
             TextSize = 10, TextColor3 = Theme.text, RichText = true,
             TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
             Position = UDim2.fromOffset(0, 14), Text = e.text or "", ZIndex = 37}, textHolder)
+
+        -- Hover tray with mod actions (only if isMod and row has msgId + discordId)
+        if isMod() and e.discordId then
+            local tray = new("Frame", {Size = UDim2.new(1, -38, 0, 22),
+                Position = UDim2.fromOffset(38, 34), BackgroundTransparency = 1,
+                Visible = false, ZIndex = 40}, row)
+            new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal,
+                HorizontalAlignment = Enum.HorizontalAlignment.Left,
+                VerticalAlignment = Enum.VerticalAlignment.Center,
+                Padding = UDim.new(0, 4)}, tray)
+
+            local function trayBtn(label, col, cb)
+                local b = new("TextButton", {Size = UDim2.fromOffset(0, 18),
+                    AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = Theme.panel2,
+                    Text = label, Font = Enum.Font.GothamBold, TextSize = 9,
+                    TextColor3 = col, AutoButtonColor = false, ZIndex = 41}, tray)
+                corner(b, 4)
+                new("UIPadding", {PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, b)
+                stroke(b, col, 1, 0.4)
+                b.MouseButton1Click:Connect(function()
+                    cb()
+                end)
+            end
+
+            if e.msgId then
+                trayBtn("🗑 delete", Theme.danger, function()
+                    doModDelete(e.msgId)
+                end)
+            end
+            trayBtn("⏱ 5m", Theme.gold, function() doModBan(e.discordId, "", 300) end)
+            trayBtn("⏱ 1h", Theme.gold, function() doModBan(e.discordId, "", 3600) end)
+            trayBtn("🔨 ban", Theme.danger, function() doModBan(e.discordId, "", 0) end)
+
+            row.MouseEnter:Connect(function() tray.Visible = true end)
+            row.MouseLeave:Connect(function() tray.Visible = false end)
+        end
 
         if e.msgId then
             chatRowsById[e.msgId] = {row = row, userId = e.userId, discordId = e.discordId}
@@ -3181,7 +3533,7 @@ do
                         if m.id and m.id > lastChatId then lastChatId = m.id end
                         addChat(m.sender, m.text, false, Color3.fromRGB(148, 204, 255),
                                 m.avatar, m.discordName, m.country, m.countryCode,
-                                m.userId, m.id, m.placeId, m.time)
+                                m.userId, m.id, m.placeId, m.time, m.discordId)
                     end
                 end
             end
@@ -3189,11 +3541,6 @@ do
     end)
 
     section(pg2, "FEEDBACK", "✉️")
-    new("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
-        Text = "send a message to @d9vq — bugs, ideas, anything",
-        Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = Theme.muted,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
     local fbHolder = tPanel(new("Frame", {Size = UDim2.new(1, 0, 0, 84),
         BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.1,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2]))
@@ -3210,7 +3557,7 @@ do
     corner(fbInput, 6)
     tStroke(stroke(fbInput, Theme.strokeSoft, 1))
     local fbSend = new("TextButton", {Size = UDim2.new(1, -12, 0, 24),
-        Position = UDim2.new(0, 6, 1, -30), BackgroundColor3 = Theme.accent, Text = "SEND FEEDBACK",
+        Position = UDim2.new(0, 6, 1, -30), BackgroundColor3 = Theme.neon, Text = "SEND FEEDBACK",
         Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = Color3.new(1, 1, 1),
         AutoButtonColor = false, ZIndex = 34}, fbHolder)
     corner(fbSend, 6)
@@ -3234,8 +3581,6 @@ do
                 notify("Feedback failed", reason, Theme.danger, 5, reason)
             end
         end)
-        pulse(fbSend, 0.94, 0.06)
-        glow(fbSend, Theme.accent2, 0.4)
     end)
 end
 
@@ -3245,7 +3590,7 @@ if isMod() then
 
     section(pg2, "LIVE ANNOUNCEMENTS", "📢")
     new("TextLabel", {Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1,
-        Text = "Broadcast a message to every REAPER user in every server.",
+        Text = "broadcast to every REAPER user in every server",
         Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = Theme.muted,
         TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
@@ -3265,14 +3610,11 @@ if isMod() then
 
     buttonRow(pg2, "Send to everyone", "📢 SEND", function(b)
         local txt = annBox.Text or ""
-        if sendAnnouncement(txt) then
-            annBox.Text = ""
-        end
+        if sendAnnouncement(txt) then annBox.Text = "" end
     end)
-
     buttonRow(pg2, "Preview locally", "PREVIEW", function()
         local txt = annBox.Text or ""
-        if txt:gsub("%s","") == "" then
+        if txt:gsub("%s", "") == "" then
             notify("Preview", "Type a message first", Theme.gold, 2); return
         end
         showAnnouncement({
@@ -3282,9 +3624,9 @@ if isMod() then
         })
     end)
 
-    section(pg2, "CHAT MODERATION", "🛡")
+    section(pg2, "CHAT MODERATION CONSOLE", "🛡")
     new("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
-        Text = "ban by Discord ID · delete messages · view ban list",
+        Text = "quick-ban by Discord ID · view/clear bans",
         Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = Theme.muted,
         TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
@@ -3313,80 +3655,44 @@ if isMod() then
     corner(reasonBox, 7)
     tStroke(stroke(reasonBox, Theme.strokeSoft, 1))
 
-    buttonRow(pg2, "Ban user from chat", "BAN", function()
-        local target = (banBox.Text or ""):gsub("%s", "")
-        if target == "" then
-            notify("Ban", "Enter a Discord ID first", Theme.gold, 2); return
-        end
-        task.spawn(function()
-            local body = HttpService:JSONEncode({
-                robloxId = tostring(LP.UserId), key = SESSION_KEY or "",
-                targetDiscordId = target, reason = reasonBox.Text or "",
-            })
-            local ok, res = httpPost(KEY_API .. "/chat/ban", body)
-            if ok then
-                notify("Banned", target, Theme.success, 3)
-                reasonBox.Text = ""
-            else
-                local reason = tostring(res)
-                notify("Ban failed", reason, Theme.danger, 5, reason)
-            end
-        end)
+    buttonRow(pg2, "Timeout 5 min", "5M", function()
+        local t = (banBox.Text or ""):gsub("%s", "")
+        if t == "" then notify("Ban", "Enter a Discord ID first", Theme.gold, 2); return end
+        doModBan(t, reasonBox.Text, 300)
+        reasonBox.Text = ""
+    end)
+    buttonRow(pg2, "Timeout 1 hour", "1H", function()
+        local t = (banBox.Text or ""):gsub("%s", "")
+        if t == "" then notify("Ban", "Enter a Discord ID first", Theme.gold, 2); return end
+        doModBan(t, reasonBox.Text, 3600)
+        reasonBox.Text = ""
+    end)
+    buttonRow(pg2, "Timeout 24 hours", "24H", function()
+        local t = (banBox.Text or ""):gsub("%s", "")
+        if t == "" then notify("Ban", "Enter a Discord ID first", Theme.gold, 2); return end
+        doModBan(t, reasonBox.Text, 86400)
+        reasonBox.Text = ""
+    end)
+    buttonRow(pg2, "Ban permanently", "BAN", function()
+        local t = (banBox.Text or ""):gsub("%s", "")
+        if t == "" then notify("Ban", "Enter a Discord ID first", Theme.gold, 2); return end
+        doModBan(t, reasonBox.Text, 0)
+        reasonBox.Text = ""
     end)
     buttonRow(pg2, "Unban user", "UNBAN", function()
-        local target = (banBox.Text or ""):gsub("%s", "")
-        if target == "" then
-            notify("Unban", "Enter a Discord ID first", Theme.gold, 2); return
-        end
+        local t = (banBox.Text or ""):gsub("%s", "")
+        if t == "" then notify("Unban", "Enter a Discord ID first", Theme.gold, 2); return end
         task.spawn(function()
             local body = HttpService:JSONEncode({
                 robloxId = tostring(LP.UserId), key = SESSION_KEY or "",
-                targetDiscordId = target,
+                targetDiscordId = t,
             })
             local ok, res = httpPost(KEY_API .. "/chat/unban", body)
             if ok then
-                notify("Unbanned", target, Theme.success, 3)
+                notify("Unbanned", t, Theme.success, 3)
             else
-                local reason = tostring(res)
-                notify("Unban failed", reason, Theme.danger, 5, reason)
-            end
-        end)
-    end)
-
-    local delBox = tPanel2(new("TextBox", {Size = UDim2.new(1, 0, 0, 28),
-        BackgroundColor3 = Theme.panel2, BackgroundTransparency = 0.1,
-        BorderSizePixel = 0, Text = "",
-        Active = true, Selectable = true,
-        PlaceholderText = "message ID to delete",
-        PlaceholderColor3 = Theme.muted, Font = Enum.Font.Gotham,
-        TextSize = 11, TextColor3 = Theme.text,
-        ClearTextOnFocus = false,
-        LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 50}, pages[pg2]))
-    corner(delBox, 7)
-    tStroke(stroke(delBox, Theme.strokeSoft, 1))
-
-    buttonRow(pg2, "Delete message", "DELETE MSG", function()
-        local id = tonumber((delBox.Text or ""):gsub("%s","")) or 0
-        if id <= 0 then
-            notify("Delete", "Enter a message ID first", Theme.gold, 2); return
-        end
-        task.spawn(function()
-            local body = HttpService:JSONEncode({
-                robloxId = tostring(LP.UserId), key = SESSION_KEY or "",
-                messageId = id,
-            })
-            local ok, res = httpPost(KEY_API .. "/chat/delete", body)
-            if ok then
-                notify("Deleted", "#"..id, Theme.success, 3)
-                delBox.Text = ""
-                for _, fn in ipairs(Chat.listeners) do
-                    if fn and type(fn) == "function" then
-                        pcall(fn, {__deleteMsgId = id})
-                    end
-                end
-            else
-                local reason = tostring(res)
-                notify("Delete failed", reason, Theme.danger, 5, reason)
+                local pretty = parseErrorReason(res)
+                notify("Unban failed", pretty, Theme.danger, 8, pretty)
             end
         end)
     end)
@@ -3420,16 +3726,24 @@ if isMod() then
         end
         banListEmpty.Visible = false
         for i, b in ipairs(bans) do
-            local row = new("Frame", {Size = UDim2.new(1, 0, 0, 24),
+            local row = new("Frame", {Size = UDim2.new(1, 0, 0, 26),
                 BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.3,
                 LayoutOrder = i, ZIndex = 34}, banListHolder)
             corner(row, 5)
             stroke(row, Theme.danger, 1, 0.4)
+            local untilTxt = "permanent"
+            if b.expires_at and b.expires_at > 0 then
+                local remaining = math.max(0, math.floor((b.expires_at - os.time() * 1000) / 1000))
+                if remaining > 3600 then untilTxt = string.format("%dh", math.floor(remaining / 3600))
+                elseif remaining > 60 then untilTxt = string.format("%dm", math.floor(remaining / 60))
+                else untilTxt = remaining .. "s" end
+            end
             new("TextLabel", {Size = UDim2.new(1, -14, 1, 0), Position = UDim2.fromOffset(10, 0),
                 BackgroundTransparency = 1,
-                Text = string.format("%s  ·  %s",
+                Text = string.format("%s  ·  %s  ·  %s",
                     tostring(b.discord_id or "?"),
-                    tostring(b.reason or "no reason")),
+                    tostring(b.reason or "no reason"),
+                    untilTxt),
                 Font = Enum.Font.Code, TextSize = 9,
                 TextColor3 = Theme.danger, TextXAlignment = Enum.TextXAlignment.Left,
                 ZIndex = 35}, row)
@@ -3449,13 +3763,13 @@ if isMod() then
                     _G.__REAPER_BANLIST_CB(data.bans)
                 end
             else
-                local reason = tostring(res)
-                notify("Ban list failed", reason, Theme.danger, 5, reason)
+                local pretty = parseErrorReason(res)
+                notify("Ban list failed", pretty, Theme.danger, 8, pretty)
             end
         end)
     end)
 
-    section(pg2, "ONLINE OWNERS / MODS", "🛡️")
+    section(pg2, "ONLINE STAFF", "🛡️")
     local staffList = new("Frame", {Size = UDim2.new(1, 0, 0, 0),
         BackgroundTransparency = 1, LayoutOrder = #pages[pg2]:GetChildren(),
         AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 33}, pages[pg2])
@@ -3495,16 +3809,6 @@ if isMod() then
     buttonRow(pg2, "Refresh staff list", "REFRESH", refreshStaff)
     Players.PlayerAdded:Connect(function() task.wait(0.5) refreshStaff() end)
     Players.PlayerRemoving:Connect(function() task.wait(0.5) refreshStaff() end)
-
-    section(pg2, "MY IDENTITY", "🪪")
-    local myInfo = infoRow(pg2, "")
-    local function refreshMyInfo()
-        local rank = getLocalRank() or "user"
-        local dId = MY_USER and MY_USER.discordId or "—"
-        myInfo.Text = string.format("discord: %s  ·  rank: %s", tostring(dId), rank)
-    end
-    refreshMyInfo()
-    buttonRow(pg2, "Refresh identity", "REFRESH", refreshMyInfo)
 end
 
 --====================== COMBAT ======================
@@ -3522,13 +3826,6 @@ do
     sliderRow(pg2, "Aimbot.MaxDist", "Max Distance", 50, 5000, 0)
     sliderRow(pg2, "Aimbot.Smoothness", "Smoothness", 1, 20, 0)
     sliderRow(pg2, "Aimbot.Strength", "Strength", 1, 10, 1)
-    buttonRow(pg2, "Target Part", Cfg.Aimbot.TargetPart, function(b)
-        local parts = {"Head", "UpperTorso", "HumanoidRootPart", "LowerTorso"}
-        local idx = 1
-        for i, p in ipairs(parts) do if p == Cfg.Aimbot.TargetPart then idx = i end end
-        idx = idx % #parts + 1
-        Cfg.Aimbot.TargetPart = parts[idx]; b.Text = parts[idx]
-    end)
     toggleRow(pg2, "Aimbot.TeamCheck", "Team Check")
     toggleRow(pg2, "Aimbot.VisibleOnly", "Visible Only")
     toggleRow(pg2, "Aimbot.ShowCircle", "Show FOV Circle")
@@ -3542,23 +3839,6 @@ do
     sliderRow(pg2, "Trigger.Radius", "Radius", 0, 100, 0)
     sliderRow(pg2, "Trigger.Delay", "Delay (s)", 0.01, 0.5, 2)
     toggleRow(pg2, "Trigger.TeamCheck", "Team Check")
-
-    section(pg2, "RETICLE ACTIONS", "🎯")
-    local actionInfo = infoRow(pg2, "")
-    local function refreshActions()
-        local k = RA.keys
-        actionInfo.Text = string.format("TP [%s]  SPEC [%s]  HUMP [%s]",
-            k.teleport and k.teleport.Name or "—",
-            k.spectate and k.spectate.Name or "—",
-            k.hump and k.hump.Name or "—")
-    end
-    refreshActions()
-    buttonRow(pg2, "Rebind Action Keys", "REDETECT", function()
-        local u = unboundKeys(3)
-        RA.keys.teleport, RA.keys.spectate, RA.keys.hump = u[1], u[2], u[3]
-        rebuildChips(); refreshActions()
-        notify("Rebound", "action keys updated", Theme.accent)
-    end)
 end
 
 --====================== VISUAL ======================
@@ -3571,22 +3851,10 @@ do
     toggleRow(pg2, "Visuals.Distance", "Distance")
     toggleRow(pg2, "Visuals.ShowRole", "Role Label")
     sliderRow(pg2, "Visuals.Fill", "Fill Transparency", 0, 1, 2)
-
-    section(pg2, "COLOR LEGEND", "🎨")
-    legendRow(pg2, "TEAM · ally", ESPColours.ally)
-    legendRow(pg2, "TEAM · enemy", ESPColours.enemy)
-    legendRow(pg2, "PCP · police", ESPColours.police)
-    legendRow(pg2, "PCP · criminal", ESPColours.criminal)
-    legendRow(pg2, "PCP · prisoner", ESPColours.prisoner)
-    legendRow(pg2, "DOW · united front", ESPColours.united)
-    legendRow(pg2, "DOW · iron legion", ESPColours.iron)
-
     section(pg2, "CAMERA", "🔍")
     toggleRow(pg2, "Visuals.InfZoom", "Infinite Zoom")
     sliderRow(pg2, "Visuals.FOVMin", "Min FOV", 0.5, 30, 1)
     sliderRow(pg2, "Visuals.FOVMax", "Max FOV", 60, 400, 0)
-
-    section(pg2, "WORLD VIEW", "🌫")
     toggleRow(pg2, "Visuals.NoFog", "No Fog")
 end
 
@@ -3601,20 +3869,17 @@ do
     sliderRow(pg2, "Movement.JumpPower", "Jump Value", 50, 800, 0)
     toggleRow(pg2, "Movement.InfiniteJump", "Infinite Jump")
     toggleRow(pg2, "Movement.GodMode", "God Mode")
-
     section(pg2, "FLIGHT", "✈")
     toggleRow(pg2, "Movement.Fly", "Fly")
     sliderRow(pg2, "Movement.FlySpeed", "Fly Speed", 10, 500, 0)
     sliderRow(pg2, "Movement.FlySmooth", "Smoothness", 1, 40, 0)
     sliderRow(pg2, "Movement.FlyBoost", "Boost Mult", 1, 6, 1)
-
     section(pg2, "EXTRAS", "⭐")
     toggleRow(pg2, "Movement.Sprint", "Sprint")
     sliderRow(pg2, "Movement.SprintSpeed", "Sprint Speed", 16, 300, 0)
     toggleRow(pg2, "Movement.Bunnyhop", "Bunnyhop")
     toggleRow(pg2, "Movement.Spinbot", "Spinbot")
     toggleRow(pg2, "Movement.AntiAFK", "Anti-AFK")
-
     section(pg2, "FREECAM", "🎥")
     toggleRow(pg2, "Movement.Freecam", "Freecam")
     sliderRow(pg2, "Movement.FreecamSpeed", "Speed", 10, 400, 0)
@@ -3655,9 +3920,8 @@ do
                 corner(row, 7)
                 if b then stroke(row, b.color, 1.6, 0.1)
                 else stroke(row, Theme.strokeSoft, 1, 0.55) end
-                hoverStripe(row, Theme.accent)
-                local nameTxt = p.Name.." "..roleLabel(p)
-                if b then nameTxt = b.emoji.." "..nameTxt end
+                local nameTxt = p.Name .. " " .. roleLabel(p)
+                if b then nameTxt = b.emoji .. " " .. nameTxt end
                 new("TextLabel", {Text = nameTxt, Font = Enum.Font.GothamBold,
                     TextSize = 11, TextColor3 = b and b.color or espColour(p),
                     BackgroundTransparency = 1,
@@ -3729,8 +3993,6 @@ do
         for i, p in ipairs(Players:GetPlayers()) do
             if p ~= LP then
                 local cur = (TS.target == p)
-                local rank = getRankFor(p.UserId)
-                local b = rank and BADGE_STYLE[rank]
                 local row = tPanel(new("Frame", {Size = UDim2.new(1, 0, 0, 26),
                     BackgroundColor3 = cur and Theme.panel2 or Theme.panel,
                     BackgroundTransparency = cur and 0 or 0.15,
@@ -3738,25 +4000,23 @@ do
                 corner(row, 7)
                 tStroke(stroke(row, cur and Theme.success or Theme.strokeSoft,
                     cur and 1.4 or 1, cur and 0 or 0.55))
-                local txt = (cur and "● " or "○ ")..p.Name
-                if b then txt = b.emoji.." "..txt end
                 new("TextLabel", {Size = UDim2.new(1, -80, 1, 0), Position = UDim2.fromOffset(14, 0),
-                    BackgroundTransparency = 1, Text = txt,
+                    BackgroundTransparency = 1, Text = (cur and "● " or "○ ") .. p.Name,
                     Font = Enum.Font.GothamBold, TextSize = 10,
-                    TextColor3 = cur and Theme.success or (b and b.color or espColour(p)),
+                    TextColor3 = cur and Theme.success or espColour(p),
                     TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 34}, row)
                 local sb = new("TextButton", {Size = UDim2.fromOffset(58, 18),
                     Position = UDim2.new(1, -66, 0.5, -9),
                     BackgroundColor3 = cur and Theme.success or Theme.panel2,
                     Text = cur and "ON" or "SET",
                     Font = Enum.Font.GothamBold, TextSize = 9,
-                    TextColor3 = cur and Color3.new(0,0,0) or Theme.accent2,
+                    TextColor3 = cur and Color3.new(0, 0, 0) or Theme.accent2,
                     AutoButtonColor = false, ZIndex = 34}, row)
                 corner(sb, 5)
                 tStroke(stroke(sb, Theme.strokeSoft, 1))
                 sb.MouseButton1Click:Connect(function()
                     TS.target = p
-                    lbl.Text = "Target: "..p.Name
+                    lbl.Text = "Target: " .. p.Name
                     HUMP.phase = 0; HUMP.smoothVel = 0; HUMP.smoothAir = 0
                     HUMP.lockTimer = 1.0; HUMP.awaitingRespawn = false
                     HUMP.fallHold = 0; HUMP.lastGoodCF = nil
@@ -3807,13 +4067,13 @@ do
     local pg2 = "save"
     section(pg2, "LOADOUTS", "💾")
     new("TextLabel", {Size = UDim2.new(1, 0, 0, 32), BackgroundTransparency = 1,
-        Text = "IO: "..(IO.has and ("✓ "..IO.reason) or ("✗ "..IO.reason)).."\nPlace: "..tostring(game.PlaceId),
+        Text = "IO: " .. (IO.has and ("✓ " .. IO.reason) or ("✗ " .. IO.reason)) .. "\nPlace: " .. tostring(game.PlaceId),
         Font = Enum.Font.GothamBold, TextSize = 9,
         TextColor3 = IO.has and Theme.success or Theme.danger,
         TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
     local autoLbl = new("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
-        Text = autoloadName and ("★ autoload: "..autoloadName) or "no autoload",
+        Text = autoloadName and ("★ autoload: " .. autoloadName) or "no autoload",
         Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = Theme.accent2,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
     local nameBox = tPanel2(new("TextBox", {Size = UDim2.new(1, 0, 0, 28),
@@ -3839,7 +4099,7 @@ do
         end
         local t = saveTable()
         local names = {}
-        for n in pairs(t) do names[#names+1] = n end
+        for n in pairs(t) do names[#names + 1] = n end
         table.sort(names)
         if #names == 0 then
             new("TextLabel", {Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
@@ -3856,9 +4116,9 @@ do
                 BackgroundTransparency = 0.15, BorderSizePixel = 0,
                 LayoutOrder = i, ZIndex = 34}, listHolder)
             corner(row, 6)
-            stroke(row, isSel and Theme.accent or Theme.strokeSoft, isSel and 1.4 or 1, isSel and 0 or 0.4)
+            stroke(row, isSel and Theme.neon or Theme.strokeSoft, isSel and 1.4 or 1, isSel and 0 or 0.4)
             new("TextLabel", {Size = UDim2.new(1, -14, 1, 0), Position = UDim2.fromOffset(10, 0),
-                BackgroundTransparency = 1, Text = (isAuto and "★ " or "  ")..n,
+                BackgroundTransparency = 1, Text = (isAuto and "★ " or "  ") .. n,
                 Font = Enum.Font.GothamBold, TextSize = 10,
                 TextColor3 = isAuto and Theme.success or Theme.accent2,
                 TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 35}, row)
@@ -3877,7 +4137,7 @@ do
     buttonRow(pg2, "Save + Autoload", "SAVE+", function()
         local n = nameBox.Text ~= "" and nameBox.Text or "default"
         saveLoadout(n, true); selected = n; refreshList()
-        autoLbl.Text = "★ autoload: "..n
+        autoLbl.Text = "★ autoload: " .. n
         notify("Autoload set", n, Theme.success)
     end)
     buttonRow(pg2, "Load", "LOAD", function()
@@ -3897,7 +4157,7 @@ do
         if not n then return end
         deleteLoadout(n)
         if selected == n then selected = nil end
-        autoLbl.Text = autoloadName and ("★ autoload: "..autoloadName) or "no autoload"
+        autoLbl.Text = autoloadName and ("★ autoload: " .. autoloadName) or "no autoload"
         refreshList()
     end)
     buttonRow(pg2, "Refresh", "REFRESH", refreshList)
@@ -3908,54 +4168,28 @@ end
 do
     local pg2 = "theme"
     section(pg2, "PALETTE", "🎨")
-    local palLbl = infoRow(pg2, "Current: Dark Purple")
-    buttonRow(pg2, "Dark Purple", "APPLY", function()
+    local palLbl = infoRow(pg2, "Current: Neon Purple")
+    buttonRow(pg2, "Neon Purple", "APPLY", function()
         Theme.setPalette("Winter"); Cfg.UI.Sakura = false
         if widgets["UI.Sakura"] then widgets["UI.Sakura"].set(false, false) end
-        applyTheme(); buildSakura(); palLbl.Text = "Current: Dark Purple"
+        applyTheme(); buildSakura(); palLbl.Text = "Current: Neon Purple"
     end)
     buttonRow(pg2, "Sakura", "APPLY", function()
         Theme.setPalette("Sakura"); Cfg.UI.Sakura = true
         if widgets["UI.Sakura"] then widgets["UI.Sakura"].set(true, false) end
         applyTheme(); buildSakura(); palLbl.Text = "Current: Sakura"
     end)
-    toggleRow(pg2, "UI.Sakura", "Sakura Leaves", function(on)
-        if on then Theme.setPalette("Sakura"); palLbl.Text = "Current: Sakura"
-        else Theme.setPalette("Winter"); palLbl.Text = "Current: Dark Purple" end
-        applyTheme(); buildSakura()
-    end)
-    sliderRow(pg2, "UI.SakuraLeaves", "Leaf Count", 10, 400, 0, function(v)
-        Theme.sakura.leaves.count = v; buildSakura()
-    end)
-    sliderRow(pg2, "UI.SakuraSpeed", "Leaf Speed", 5, 80, 0, function(v)
-        Theme.sakura.leaves.speed = v
-    end)
-
     section(pg2, "EFFECTS", "✨")
     toggleRow(pg2, "UI.Juicy", "Juicy Effects")
     toggleRow(pg2, "UI.Notifs", "Notifications")
     toggleRow(pg2, "UI.Ambient", "Ambient Particles")
     toggleRow(pg2, "UI.ShimmerHeaders", "Animated Headers")
-    toggleRow(pg2, "UI.BorderGlow", "Border Glow")
     toggleRow(pg2, "UI.AnimatedOpen", "Animated Menu")
     toggleRow(pg2, "UI.MenuBlur", "Blur Background")
-
-    section(pg2, "HUDs", "⚡")
-    toggleRow(pg2, "UI.HUD", "Keybind HUD")
-    toggleRow(pg2, "UI.HUDMovable", "HUD Movable")
-    toggleRow(pg2, "UI.HUDResizable", "HUD Resizable")
-    toggleRow(pg2, "UI.AD", "Auto-Detect HUD")
-    toggleRow(pg2, "UI.ADMovable", "Auto-Detect Movable")
-    toggleRow(pg2, "UI.ADResizable", "Auto-Detect Resizable")
-
     section(pg2, "CROSSHAIR", "🎯")
     toggleRow(pg2, "UI.Crosshair", "Enable Crosshair")
-    toggleRow(pg2, "UI.CrosshairPulse", "Pulse")
     sliderRow(pg2, "UI.CrosshairSize", "Size", 12, 60, 0)
     sliderRow(pg2, "UI.CrosshairThick", "Thickness", 1, 6, 0)
-    toggleRow(pg2, "UI.ReticleLine", "Tracking Line")
-    toggleRow(pg2, "UI.ReticleHP", "Health Bar")
-
     section(pg2, "MENU OPACITY", "🌫")
     sliderRow(pg2, "UI.MenuOpacity", "Transparency", 0, 0.9, 2, function(v) applyOpacity(v) end)
 end
@@ -3963,27 +4197,16 @@ end
 --==================== FINALIZE ====================
 for _, p in pairs(pages) do p.Visible = false end
 pages.home.Visible = true
-tabs.home.BackgroundColor3 = Theme.accent
+tabs.home.BackgroundColor3 = Theme.neon
 tabs.home.TextColor3 = Color3.new(1, 1, 1)
 applyTheme()
 applyOpacity(Cfg.UI.MenuOpacity or 0)
-statusLbl.Text = "REAPER  ·  place "..tostring(game.PlaceId)
+statusLbl.Text = "REAPER  ·  place " .. tostring(game.PlaceId)
 pcall(refreshHUD)
 pcall(refreshAD)
 rebuildChips()
-task.defer(function()
-    if autoloadName and loadLoadout(autoloadName) then
-        for p, w in pairs(widgets) do
-            local v = getPath(Cfg, p)
-            if v ~= nil then pcall(w.set, v, false) end
-        end
-        applyTheme(); applyOpacity(Cfg.UI.MenuOpacity or 0)
-        pcall(refreshHUD); pcall(refreshAD); rebuildChips()
-        notify("Autoloaded", autoloadName, Theme.success)
-    end
-end)
 
--- Announcement polling
+-- Announcement polling (shows sender's own announcements too — we removed the self-skip)
 task.spawn(function()
     local lastAnnId = 0
     while gui and gui.Parent do
@@ -3994,7 +4217,8 @@ task.spawn(function()
             if okD and type(data) == "table" and data.announcements then
                 for _, m in ipairs(data.announcements) do
                     if m.id and m.id > lastAnnId then lastAnnId = m.id end
-                    if tostring(m.userId) ~= tostring(LP.UserId) then
+                    -- Skip announcements we already showed locally on send
+                    if not annCurrent or tostring(annCurrent.text) ~= tostring(m.text) then
                         showAnnouncement(m)
                     end
                 end
@@ -4109,7 +4333,7 @@ fovCircle = new("Frame", {AnchorPoint = Vector2.new(0.5, 0.5),
     Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(200, 200),
     BackgroundTransparency = 1, Visible = false, ZIndex = 1}, gui)
 corner(fovCircle, 10000)
-tAcc(stroke(fovCircle, Theme.accent, 1, 0.4))
+tAcc(stroke(fovCircle, Theme.neon, 1, 0.4))
 function aimTarget()
     local c = LP.Character
     if not c then return nil end
@@ -4249,17 +4473,13 @@ local function detectRole(player)
     if hasGun then return "Sheriff" end
     return "Innocent"
 end
-local function updateAllRoleESP()
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LP then
-            local role = detectRole(player)
-            roleCache[player.UserId] = role
-        end
-    end
-end
 task.spawn(function()
     while gui and gui.Parent do
-        updateAllRoleESP()
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LP then
+                roleCache[player.UserId] = detectRole(player)
+            end
+        end
         task.wait(1)
     end
 end)
@@ -4297,16 +4517,14 @@ RS.Heartbeat:Connect(function()
                         outline = espOutline(p)
                         roleL = roleLabel(p)
                     end
-
                     local rank = getRankFor(p.UserId)
                     local badge = rank and BADGE_STYLE[rank]
                     local nameTagPrefix = ""
                     if badge then
                         base = badge.color
                         outline = Color3.new(base.R * 1.2, base.G * 1.2, base.B * 1.2)
-                        nameTagPrefix = badge.emoji.." "
+                        nameTagPrefix = badge.emoji .. " "
                     end
-
                     local d = espData[p]
                     if not d or not d.hl or d.hl.Adornee ~= ch then
                         removeESP(p)
@@ -4326,19 +4544,19 @@ RS.Heartbeat:Connect(function()
                         local nl = new("TextLabel", {BackgroundTransparency = 1,
                             Size = UDim2.new(1, 0, 0, 18), Font = Enum.Font.GothamBold,
                             TextSize = 13, TextColor3 = outline,
-                            TextStrokeTransparency = 0.2, TextStrokeColor3 = Color3.new(0,0,0),
-                            Text = nameTagPrefix..p.Name, Visible = Cfg.Visuals.NameTags, Parent = bb})
+                            TextStrokeTransparency = 0.2, TextStrokeColor3 = Color3.new(0, 0, 0),
+                            Text = nameTagPrefix .. p.Name, Visible = Cfg.Visuals.NameTags, Parent = bb})
                         local dl = new("TextLabel", {BackgroundTransparency = 1,
                             Position = UDim2.new(0, 0, 0, 18), Size = UDim2.new(1, 0, 0, 14),
                             Font = Enum.Font.Gotham, TextSize = 11,
                             TextColor3 = Color3.fromRGB(200, 210, 230),
-                            TextStrokeTransparency = 0.5, TextStrokeColor3 = Color3.new(0,0,0),
+                            TextStrokeTransparency = 0.5, TextStrokeColor3 = Color3.new(0, 0, 0),
                             Text = "", Visible = Cfg.Visuals.Distance, Parent = bb})
                         local rl = new("TextLabel", {BackgroundTransparency = 1,
                             Position = UDim2.new(0, 0, 0, 34), Size = UDim2.new(1, 0, 0, 16),
                             Font = Enum.Font.GothamBlack, TextSize = 12,
                             TextColor3 = base, TextStrokeTransparency = 0.3,
-                            TextStrokeColor3 = Color3.new(0,0,0),
+                            TextStrokeColor3 = Color3.new(0, 0, 0),
                             Text = "", Visible = Cfg.Visuals.ShowRole, Parent = bb})
                         espData[p] = {hl = hl, bb = bb, nameLbl = nl, distLbl = dl, roleLbl = rl}
                         d = espData[p]
@@ -4351,7 +4569,7 @@ RS.Heartbeat:Connect(function()
                     if d.nameLbl then
                         d.nameLbl.Visible = Cfg.Visuals.NameTags
                         d.nameLbl.TextColor3 = outline
-                        d.nameLbl.Text = nameTagPrefix..p.Name
+                        d.nameLbl.Text = nameTagPrefix .. p.Name
                     end
                     if d.distLbl then
                         d.distLbl.Visible = Cfg.Visuals.Distance
@@ -4645,7 +4863,7 @@ function flingPlayer(p)
     flinging = false
 end
 
---==================== TROLL ====================
+--==================== TROLL (hump engine) ====================
 function getTargetPlayer()
     if TS.target then
         local c = TS.target.Character
@@ -4669,6 +4887,7 @@ function getTargetPlayer()
     return best
 end
 
+-- Auto-detect tuner (multipliers only)
 RS.Heartbeat:Connect(function(dt)
     pcall(function()
         if not Cfg.Troll.HumpAutoDetect then return end
@@ -4677,18 +4896,15 @@ RS.Heartbeat:Connect(function(dt)
         local tR = t.Character:FindFirstChild("HumanoidRootPart")
         local tH = t.Character:FindFirstChildOfClass("Humanoid")
         if not tR or not tH then return end
-
         local vel = tR.AssemblyLinearVelocity
         local s = vel.Magnitude
         HR.speed = s
         local sAlpha = 1 - math.exp(-8 * dt)
         HR.smoothSpeed = HR.smoothSpeed + (s - HR.smoothSpeed) * sAlpha
-
         local airRaw = (tH.FloorMaterial == Enum.Material.Air or vel.Y > 6) and 1 or 0
         local aAlpha = 1 - math.exp(-6 * dt)
         HUMP.smoothAir = HUMP.smoothAir + (airRaw - HUMP.smoothAir) * aAlpha
         HR.airborne = HUMP.smoothAir > 0.5
-
         local sm = HR.smoothSpeed
         local function tierFor(v)
             if v < 3 then return "STILL"
@@ -4702,35 +4918,24 @@ RS.Heartbeat:Connect(function(dt)
             HUMP.lockTimer = HUMP.lockTimer + dt
             if HUMP.lockTimer > 0.35 then HR.tier = rawTier; HUMP.lockTimer = 0 end
         else HUMP.lockTimer = 0 end
-
         local targetSpeedMult, targetAmpMult, targetDistMult
-        if HR.tier == "STILL" then
-            targetSpeedMult, targetAmpMult, targetDistMult = 0.75, 0.90, 1.00
-        elseif HR.tier == "WALK" then
-            targetSpeedMult, targetAmpMult, targetDistMult = 1.15, 1.05, 1.05
-        elseif HR.tier == "RUN" then
-            targetSpeedMult, targetAmpMult, targetDistMult = 1.65, 1.15, 1.15
-        elseif HR.tier == "FAST" then
-            targetSpeedMult, targetAmpMult, targetDistMult = 2.15, 1.25, 1.25
-        else
-            targetSpeedMult, targetAmpMult, targetDistMult = 2.80, 1.35, 1.35
-        end
-
+        if HR.tier == "STILL" then targetSpeedMult, targetAmpMult, targetDistMult = 0.75, 0.90, 1.00
+        elseif HR.tier == "WALK" then targetSpeedMult, targetAmpMult, targetDistMult = 1.15, 1.05, 1.05
+        elseif HR.tier == "RUN" then targetSpeedMult, targetAmpMult, targetDistMult = 1.65, 1.15, 1.15
+        elseif HR.tier == "FAST" then targetSpeedMult, targetAmpMult, targetDistMult = 2.15, 1.25, 1.25
+        else targetSpeedMult, targetAmpMult, targetDistMult = 2.80, 1.35, 1.35 end
         if HR.airborne then
             targetSpeedMult = targetSpeedMult * 1.20
-            targetAmpMult   = targetAmpMult   * 1.10
+            targetAmpMult = targetAmpMult * 1.10
         end
-
         local alpha = 1 - math.exp(-3.5 * dt)
         HUMP.speedMult = HUMP.speedMult + (targetSpeedMult - HUMP.speedMult) * alpha
-        HUMP.ampMult   = HUMP.ampMult   + (targetAmpMult   - HUMP.ampMult)   * alpha
-        HUMP.distMult  = HUMP.distMult  + (targetDistMult  - HUMP.distMult)  * alpha
-
+        HUMP.ampMult = HUMP.ampMult + (targetAmpMult - HUMP.ampMult) * alpha
+        HUMP.distMult = HUMP.distMult + (targetDistMult - HUMP.distMult) * alpha
         if HR.tier == "STILL" then HR.autoMode = "Close"
         elseif HR.tier == "EXTREME" then HR.autoMode = "Catch"
         elseif HR.airborne then HR.autoMode = "Air"
         else HR.autoMode = "Hybrid" end
-
         pcall(refreshAD)
     end)
 end)
@@ -4752,7 +4957,6 @@ RS.Heartbeat:Connect(function(dt)
                 end
             end
         end
-
         if Cfg.Troll.Hump then
             local t = TS.target or getTargetPlayer()
             if t then
@@ -4761,7 +4965,6 @@ RS.Heartbeat:Connect(function(dt)
                     local mR = mC:FindFirstChild("HumanoidRootPart")
                     local mH = mC:FindFirstChildOfClass("Humanoid")
                     if not (mR and mH) then return end
-
                     if HUMP.awaitingRespawn then
                         if t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
                             local newH = t.Character:FindFirstChildOfClass("Humanoid")
@@ -4782,10 +4985,8 @@ RS.Heartbeat:Connect(function(dt)
                         TS.humpWasActive = true
                         return
                     end
-
                     local tR = t.Character and t.Character:FindFirstChild("HumanoidRootPart")
                     local tH = t.Character and t.Character:FindFirstChildOfClass("Humanoid")
-
                     if not tR or not tH or tH.Health <= 0 then
                         if Cfg.Troll.HumpFallProtect then
                             HUMP.awaitingRespawn = true
@@ -4795,11 +4996,9 @@ RS.Heartbeat:Connect(function(dt)
                         TS.humpWasActive = true
                         return
                     end
-
                     local tY = tR.Position.Y
                     local tVelY = tR.AssemblyLinearVelocity.Y
                     local isFalling = (tY < -40) or (tVelY < -75)
-
                     if isFalling and Cfg.Troll.HumpFallProtect then
                         HR.fallingUnder = true
                         HUMP.fallHold = 2.5
@@ -4811,7 +5010,6 @@ RS.Heartbeat:Connect(function(dt)
                         TS.humpWasActive = true
                         return
                     end
-
                     if HUMP.fallHold > 0 then
                         HUMP.fallHold = HUMP.fallHold - dt
                         mR.AssemblyLinearVelocity = Vector3.zero
@@ -4821,9 +5019,7 @@ RS.Heartbeat:Connect(function(dt)
                         return
                     end
                     HR.fallingUnder = false
-
                     if tY > -20 then HUMP.lastGoodCF = mR.CFrame end
-
                     if Cfg.Troll.HumpKeepOwner then
                         pcall(function() mR:SetNetworkOwner(LP) end)
                     end
@@ -4832,25 +5028,20 @@ RS.Heartbeat:Connect(function(dt)
                     else
                         if mH.PlatformStand then mH.PlatformStand = false end
                     end
-
                     local sm_ = Cfg.Troll.HumpAutoDetect and HUMP.speedMult or 1
-                    local am_ = Cfg.Troll.HumpAutoDetect and HUMP.ampMult   or 1
-                    local dm_ = Cfg.Troll.HumpAutoDetect and HUMP.distMult  or 1
+                    local am_ = Cfg.Troll.HumpAutoDetect and HUMP.ampMult or 1
+                    local dm_ = Cfg.Troll.HumpAutoDetect and HUMP.distMult or 1
                     local useSpeed = math.clamp(Cfg.Troll.HumpSpeed * sm_, 0.5, 200)
-                    local useAmp   = math.clamp(Cfg.Troll.HumpAmp   * am_, 0.1, 8)
-                    local useDist  = math.clamp(Cfg.Troll.HumpDist  * dm_, 0.5, 8)
-
+                    local useAmp = math.clamp(Cfg.Troll.HumpAmp * am_, 0.1, 8)
+                    local useDist = math.clamp(Cfg.Troll.HumpDist * dm_, 0.5, 8)
                     HUMP.phase = HUMP.phase + dt * useSpeed
                     if HUMP.phase > math.pi * 2000 then HUMP.phase = HUMP.phase % (math.pi * 2) end
-
                     local pos = tR.Position
                     local look = tR.CFrame.LookVector
                     local vel = tR.AssemblyLinearVelocity
-
                     local thrust = math.sin(HUMP.phase) * useAmp
                     local behindPos = pos - look * (useDist - thrust)
                     local want = Vector3.new(behindPos.X, pos.Y, behindPos.Z)
-
                     local cf
                     if Cfg.Troll.HumpYawOnly then
                         local _, yaw = tR.CFrame:ToEulerAnglesYXZ()
@@ -4858,14 +5049,11 @@ RS.Heartbeat:Connect(function(dt)
                     else
                         cf = CFrame.lookAt(want, want + look, Vector3.new(0, 1, 0))
                     end
-
                     local posAlpha = 1 - math.exp(-25 * dt)
                     mR.CFrame = mR.CFrame:Lerp(cf, posAlpha)
                     mR.AssemblyAngularVelocity = Vector3.zero
-
                     if Cfg.Troll.HumpVelMatch then mR.AssemblyLinearVelocity = vel
                     else mR.AssemblyLinearVelocity = Vector3.zero end
-
                     if Cfg.Movement.Noclip then noclipChar(mC) end
                     TS.humpWasActive = true
                 end
@@ -4894,7 +5082,6 @@ RS.Heartbeat:Connect(function(dt)
             HUMP.awaitingRespawn = false; HUMP.fallHold = 0
             HR.fallingUnder = false
         end
-
         pcall(refreshAD)
     end)
 end)
@@ -4982,4 +5169,4 @@ LP.OnTeleport:Connect(function()
     if autoloadName then pcall(saveLoadout, autoloadName, true) end
 end)
 
-print("[REAPER] loaded · place "..tostring(game.PlaceId))
+print("[REAPER] loaded · place " .. tostring(game.PlaceId))
