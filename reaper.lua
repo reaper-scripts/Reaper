@@ -97,7 +97,19 @@ if RS0:IsServer() then
             local text = tostring(payload.text or ""):gsub("[\n\r]", " ")
             if text == "" then return end
             if #text > 200 then text = text:sub(1,200) end
-            local msg = {sender = plr.Name, userId = plr.UserId, text = text, time = os.time()}
+            local avatar = tostring(payload.avatar or "")
+            local dname  = tostring(payload.username or "")
+            local ctry   = tostring(payload.country or "")
+            local ccode  = tostring(payload.countryCode or "")
+            if #avatar > 400 then avatar = avatar:sub(1,400) end
+            if #dname  > 64  then dname  = dname:sub(1,64) end
+            if #ctry   > 64  then ctry   = ctry:sub(1,64) end
+            if #ccode  > 4   then ccode  = ccode:sub(1,4) end
+            local msg = {
+                sender = plr.Name, userId = plr.UserId, text = text, time = os.time(),
+                avatar = avatar, discordName = dname,
+                country = ctry, countryCode = ccode,
+            }
             history[#history+1] = msg
             if #history > 100 then table.remove(history, 1) end
             bcast("chat", msg)
@@ -185,6 +197,86 @@ do
     end
 end
 print("[REAPER] IO: "..tostring(IO.has).." ("..IO.reason..")")
+
+--==================== MY USER + COUNTRY + CHAT AVATAR CACHE ====================
+MY_USER = nil
+
+function flagEmoji(code)
+    if not code or #code ~= 2 then return "🌍" end
+    code = code:upper()
+    local a, b = code:byte(1) - 65, code:byte(2) - 65
+    if a < 0 or a > 25 or b < 0 or b > 25 then return "🌍" end
+    local function enc(x)
+        local cp = 0x1F1E6 + x
+        return string.char(
+            0xF0 | (cp >> 18),
+            0x80 | ((cp >> 12) & 0x3F),
+            0x80 | ((cp >> 6) & 0x3F),
+            0x80 | (cp & 0x3F)
+        )
+    end
+    return enc(a) .. enc(b)
+end
+
+function fetchCountry(cb)
+    task.spawn(function()
+        local req = (syn and syn.request) or (http and http.request) or http_request or request
+        if not req then cb("Unknown", ""); return end
+        local urls = {
+            "http://ip-api.com/json/?fields=status,country,countryCode",
+            "https://ipapi.co/json/",
+        }
+        for _, u in ipairs(urls) do
+            local ok, res = pcall(req, {Url = u, Method = "GET"})
+            if ok and type(res) == "table" and res.Body then
+                local okD, data = pcall(function()
+                    return game:GetService("HttpService"):JSONDecode(res.Body)
+                end)
+                if okD and type(data) == "table" then
+                    if data.status == "success" or data.country then
+                        cb(data.country or "Unknown", data.countryCode or data.country_code or "")
+                        return
+                    end
+                end
+            end
+        end
+        cb("Unknown", "")
+    end)
+end
+
+chatAvatarCache = {}
+local function strHash(s)
+    local h = 5381
+    for i = 1, #s do h = (h * 33 + s:byte(i)) % 2147483647 end
+    return string.format("%x", h)
+end
+function getChatAvatarAsset(url)
+    if not url or url == "" then return nil end
+    if chatAvatarCache[url] ~= nil then return chatAvatarCache[url] or nil end
+    if not IO.has or type(getcustomasset) ~= "function" then
+        chatAvatarCache[url] = false; return nil
+    end
+    local fname = "Reaper_av_" .. strHash(url) .. ".png"
+    local ok, exists = pcall(IO.isfile, fname)
+    if not ok or not exists then
+        local req = (syn and syn.request) or (http and http.request) or http_request or request
+        if not req then chatAvatarCache[url] = false; return nil end
+        local ok2, res = pcall(req, {Url = url, Method = "GET"})
+        if not ok2 or type(res) ~= "table" or not res.Body then
+            chatAvatarCache[url] = false; return nil
+        end
+        if not pcall(IO.write, fname, res.Body) then
+            chatAvatarCache[url] = false; return nil
+        end
+    end
+    local ok3, asset = pcall(getcustomasset, fname)
+    if ok3 and asset then
+        chatAvatarCache[url] = asset
+        return asset
+    end
+    chatAvatarCache[url] = false
+    return nil
+end
 
 --==================== FEEDBACK + KEY API ====================
 FEEDBACK_WEBHOOK = "https://proud-hill-8cf1.bigphatnigur.workers.dev/feedback"
@@ -336,13 +428,17 @@ end
 
 --==================== CHAT ====================
 Chat = {messages = {}, listeners = {}, max = 400}
-function addChat(sender, text, isLocal, col)
+function addChat(sender, text, isLocal, col, avatar, discordName, country, countryCode)
     local e = {
         sender = sender or "?",
         text = tostring(text or ""),
         isLocal = isLocal and true or false,
         col = col or Color3.fromRGB(140, 200, 255),
         time = tick(),
+        avatar = avatar,
+        discordName = discordName,
+        country = country,
+        countryCode = countryCode,
     }
     Chat.messages[#Chat.messages+1] = e
     if #Chat.messages > Chat.max then table.remove(Chat.messages, 1) end
@@ -352,8 +448,17 @@ function sendChat(text)
     text = tostring(text or ""):gsub("^%s+",""):gsub("%s+$","")
     if text == "" then return false end
     if #text > 200 then text = text:sub(1,200) end
-    addChat(LP.Name, text, true, Theme.success)
-    if Net.up then Net.send("chat", {text = text}) end
+    local av = MY_USER and MY_USER.avatar or ""
+    local dn = MY_USER and MY_USER.username or ""
+    local ct = MY_USER and MY_USER.country or ""
+    local cc = MY_USER and MY_USER.countryCode or ""
+    addChat(LP.Name, text, true, Theme.success, av, dn, ct, cc)
+    if Net.up then
+        Net.send("chat", {
+            text = text, avatar = av, username = dn,
+            country = ct, countryCode = cc,
+        })
+    end
     return true
 end
 
@@ -392,7 +497,8 @@ if Net.up then
     Net.remote.OnClientEvent:Connect(function(ch, a, b)
         if ch == "chat" then
             if type(a) == "table" and a.sender and a.text then
-                addChat(a.sender, a.text, false, Color3.fromRGB(140, 200, 255))
+                addChat(a.sender, a.text, false, Color3.fromRGB(140, 200, 255),
+                        a.avatar, a.discordName, a.country, a.countryCode)
             end
         elseif ch == "userCount" then
             Net.count = a or 1
@@ -552,7 +658,8 @@ function deepCopy(t)
     local o = {}
     for k, v in pairs(t) do o[k] = deepCopy(v) end
     return o
-end--==================== KEY SYSTEM (INSTRUCTIONAL OAUTH) ====================
+end
+
 --==================== KEY SYSTEM (PERSISTENT OAUTH + WELCOME GATE) ====================
 local SESSION_KEY = nil
 
@@ -616,10 +723,7 @@ local function downloadAvatar(url)
     local ok3, assetId = pcall(getcustomasset, cacheFile)
     if ok3 and assetId then return assetId end
     return nil
-end
-
---==================== VERIFIED WELCOME SCREEN ====================
---==================== VERIFIED WELCOME SCREEN ====================
+end--==================== VERIFIED WELCOME SCREEN ====================
 local function showVerifiedScreen(user)
     local pg = LP:WaitForChild("PlayerGui")
     local existing = pg:FindFirstChild("ReaperVerified")
@@ -632,7 +736,6 @@ local function showVerifiedScreen(user)
         BackgroundColor3 = Color3.fromRGB(2, 3, 8), BackgroundTransparency = 0.25,
         BorderSizePixel = 0, ZIndex = 1}, sg)
 
-    -- Ambient rising particles (kept BELOW the card's ZIndex so nothing overlaps)
     task.spawn(function()
         while sg.Parent do
             local sz = math.random(2, 4)
@@ -658,7 +761,6 @@ local function showVerifiedScreen(user)
     corner(card, 22)
     grad(card, Color3.fromRGB(10, 14, 26), Color3.fromRGB(4, 6, 14), 90)
 
-    -- Subtle inner top glow
     local topGlow = new("Frame", {Size = UDim2.new(1, -2, 0, 140),
         Position = UDim2.fromOffset(1, 1), BackgroundColor3 = Theme.accent,
         BackgroundTransparency = 0.94, BorderSizePixel = 0, ZIndex = 11}, card)
@@ -668,7 +770,6 @@ local function showVerifiedScreen(user)
         NumberSequenceKeypoint.new(1, 1),
     }), Rotation = 90}, topGlow)
 
-    -- Animated rainbow outline
     local borderGlow = new("Frame", {Size = UDim2.new(1, 16, 1, 16),
         Position = UDim2.new(0.5, 0, 0.5, 0), AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Theme.success, BackgroundTransparency = 0.5,
@@ -690,15 +791,11 @@ local function showVerifiedScreen(user)
         end
     end)
 
-    --==================== AVATAR (circle, clean) ====================
-    -- Outer ring frame acts as border only. ImageLabel is a sibling, not child,
-    -- so its square corners never show through the round ring.
     local avatarSize = 96
     local avatarWrap = new("Frame", {Size = UDim2.fromOffset(avatarSize, avatarSize),
         Position = UDim2.new(0.5, 0, 0, 34), AnchorPoint = Vector2.new(0.5, 0),
         BackgroundTransparency = 1, ZIndex = 13}, card)
 
-    -- Soft glow behind avatar
     local avatarGlow = new("Frame", {Size = UDim2.fromScale(1, 1),
         Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Theme.success, BackgroundTransparency = 0.72,
@@ -716,7 +813,6 @@ local function showVerifiedScreen(user)
     end)
     glowTween1:Play()
 
-    -- The avatar image itself, clipped to a circle via UICorner
     local avatarHolder = new("Frame", {Size = UDim2.fromScale(1, 1),
         BackgroundColor3 = Theme.panel2, BorderSizePixel = 0,
         ZIndex = 14, ClipsDescendants = true}, avatarWrap)
@@ -735,7 +831,6 @@ local function showVerifiedScreen(user)
     end
 
     if not loaded then
-        -- Fallback: gradient with initial letter
         local fb = new("Frame", {Size = UDim2.fromScale(1, 1),
             BackgroundColor3 = Theme.accent, BorderSizePixel = 0, ZIndex = 15}, avatarHolder)
         corner(fb, avatarSize / 2)
@@ -746,13 +841,11 @@ local function showVerifiedScreen(user)
             TextColor3 = Color3.new(1, 1, 1), ZIndex = 16}, fb)
     end
 
-    -- Clean circular border (in front, no clip needed)
     local avatarBorder = new("Frame", {Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1, ZIndex = 16}, avatarHolder)
     corner(avatarBorder, avatarSize / 2)
-    local abStroke = stroke(avatarBorder, Theme.success, 2.4, 0.05)
+    stroke(avatarBorder, Theme.success, 2.4, 0.05)
 
-    -- Online dot in bottom-right
     local dotOuter = new("Frame", {Size = UDim2.fromOffset(24, 24),
         Position = UDim2.new(1, -24, 1, -24), BackgroundColor3 = Theme.bg,
         BorderSizePixel = 0, ZIndex = 17}, avatarWrap)
@@ -762,7 +855,6 @@ local function showVerifiedScreen(user)
         BackgroundColor3 = Theme.success, BorderSizePixel = 0, ZIndex = 18}, dotOuter)
     corner(dotInner, 8)
 
-    --==================== USER INFO ====================
     local nameY = 34 + avatarSize + 14
     new("TextLabel", {Size = UDim2.new(1, -40, 0, 26),
         Position = UDim2.fromOffset(20, nameY), BackgroundTransparency = 1,
@@ -776,7 +868,6 @@ local function showVerifiedScreen(user)
         Font = Enum.Font.Gotham, TextSize = 13,
         TextColor3 = Theme.muted, ZIndex = 12}, card)
 
-    -- Status pill
     local pillW = 108
     local pill = new("Frame", {Size = UDim2.fromOffset(pillW, 20),
         Position = UDim2.new(0.5, -pillW/2, 0, nameY + 50),
@@ -788,7 +879,6 @@ local function showVerifiedScreen(user)
         Text = "● MEMBER VERIFIED", Font = Enum.Font.GothamBold, TextSize = 9,
         TextColor3 = Theme.success, ZIndex = 13}, pill)
 
-    --==================== LOAD BUTTON ====================
     local btnY = nameY + 84
     local loadBtn = new("TextButton", {Size = UDim2.new(1, -60, 0, 54),
         Position = UDim2.fromOffset(30, btnY), BackgroundColor3 = Theme.accent,
@@ -799,7 +889,6 @@ local function showVerifiedScreen(user)
     grad(loadBtn, Theme.accent, Theme.accent3, 0)
     local lStroke = stroke(loadBtn, Theme.accent2, 1.5, 0.3)
 
-    -- Shine sweep (bounded by ClipsDescendants on the button)
     local shine = new("Frame", {Size = UDim2.new(0.35, 0, 1, 0),
         Position = UDim2.new(-0.4, 0, 0, 0), BackgroundColor3 = Color3.new(1,1,1),
         BackgroundTransparency = 0.7, BorderSizePixel = 0, ZIndex = 14}, loadBtn)
@@ -831,7 +920,6 @@ local function showVerifiedScreen(user)
         Font = Enum.Font.GothamMedium, TextSize = 10,
         TextColor3 = Theme.muted, ZIndex = 12}, card)
 
-    -- Entrance
     card.Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 + 90)
     card.BackgroundTransparency = 1
     Tween:Create(card, TweenInfo.new(0.6, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
@@ -855,7 +943,7 @@ local function showVerifiedScreen(user)
     while not done do task.wait(0.2) end
     return true
 end
---==================== KEY PROMPT ====================
+
 --==================== KEY PROMPT ====================
 local function showKeyPrompt()
     local pg = LP:WaitForChild("PlayerGui")
@@ -877,7 +965,6 @@ local function showKeyPrompt()
     corner(card, 22)
     grad(card, Color3.fromRGB(10, 14, 26), Color3.fromRGB(4, 6, 14), 90)
 
-    -- Inner top glow
     local topGlow = new("Frame", {Size = UDim2.new(1, -2, 0, 130),
         Position = UDim2.fromOffset(1, 1), BackgroundColor3 = Theme.accent,
         BackgroundTransparency = 0.94, BorderSizePixel = 0, ZIndex = 11}, card)
@@ -887,7 +974,6 @@ local function showKeyPrompt()
         NumberSequenceKeypoint.new(1, 1),
     }), Rotation = 90}, topGlow)
 
-    -- Animated rainbow outline
     local borderGlow = new("Frame", {Size = UDim2.new(1, 16, 1, 16),
         Position = UDim2.new(0.5, 0, 0.5, 0), AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.55,
@@ -918,7 +1004,6 @@ local function showKeyPrompt()
         Text = "Complete both steps to unlock REAPER.",
         Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = Theme.muted, ZIndex = 12}, card)
 
-    -- STEP 1
     local s1 = new("Frame", {Size = UDim2.new(1, -60, 0, 116),
         Position = UDim2.fromOffset(30, 88), BackgroundColor3 = Theme.panel,
         BackgroundTransparency = 0.2, BorderSizePixel = 0, ZIndex = 12}, card)
@@ -926,7 +1011,6 @@ local function showKeyPrompt()
     local s1Stroke = stroke(s1, Theme.strokeSoft, 1.2, 0.4)
     grad(s1, Color3.fromRGB(22, 30, 50), Theme.panel, 90)
 
-    -- Number tag
     local s1Tag = new("Frame", {Size = UDim2.fromOffset(24, 24),
         Position = UDim2.fromOffset(14, 14), BackgroundColor3 = Theme.accent,
         BorderSizePixel = 0, ZIndex = 13}, s1)
@@ -955,7 +1039,6 @@ local function showKeyPrompt()
     local invGrad = grad(invBtn, Theme.accent, Theme.accent3, 0)
     local invStroke = stroke(invBtn, Theme.accent2, 1.3, 0.3)
 
-    -- STEP 2
     local s2 = new("Frame", {Size = UDim2.new(1, -60, 0, 116),
         Position = UDim2.fromOffset(30, 214), BackgroundColor3 = Theme.panel,
         BackgroundTransparency = 0.2, BorderSizePixel = 0, ZIndex = 12}, card)
@@ -991,7 +1074,6 @@ local function showKeyPrompt()
     local authGrad = grad(authBtn, Theme.accent, Theme.accent3, 0)
     local authStroke = stroke(authBtn, Theme.accent2, 1.3, 0.3)
 
-    -- STATUS BAR
     local statusWrap = new("Frame", {Size = UDim2.new(1, -60, 0, 60),
         Position = UDim2.fromOffset(30, 340), BackgroundColor3 = Theme.panel,
         BackgroundTransparency = 0.4, BorderSizePixel = 0, ZIndex = 12}, card)
@@ -1001,7 +1083,7 @@ local function showKeyPrompt()
         Position = UDim2.fromOffset(14, 26), BackgroundColor3 = Theme.muted,
         BorderSizePixel = 0, ZIndex = 13}, statusWrap)
     corner(dot, 5)
-    local statusLbl = new("TextLabel", {Size = UDim2.new(1, -40, 1, -10),
+    local statusLbl2 = new("TextLabel", {Size = UDim2.new(1, -40, 1, -10),
         Position = UDim2.fromOffset(30, 5), BackgroundTransparency = 1,
         Text = "Ready. Start with Step 1.",
         Font = Enum.Font.GothamMedium, TextSize = 11, TextColor3 = Theme.muted,
@@ -1010,13 +1092,12 @@ local function showKeyPrompt()
         TextWrapped = true, ZIndex = 13}, statusWrap)
 
     local function setStatus(msg, col, dcol)
-        statusLbl.Text = msg
-        statusLbl.TextColor3 = col or Theme.muted
+        statusLbl2.Text = msg
+        statusLbl2.TextColor3 = col or Theme.muted
         dot.BackgroundColor3 = dcol or Theme.muted
         Tween:Create(statusStroke, TweenInfo.new(0.2), {Color = dcol or Theme.strokeSoft}):Play()
     end
 
-    -- Progress bar
     local progWrap = new("Frame", {Size = UDim2.new(1, -60, 0, 4),
         Position = UDim2.fromOffset(30, 408), BackgroundColor3 = Theme.panel2,
         BorderSizePixel = 0, ZIndex = 12}, card)
@@ -1142,6 +1223,7 @@ local function showKeyPrompt()
     while not result.done do task.wait(0.2) end
     return result.user
 end
+
 --==================== VERIFY SESSION ====================
 local function verifySession()
     local function tryCheck(k)
@@ -1188,7 +1270,19 @@ if not verifiedUser then
     return
 end
 
+-- Populate MY_USER + live country fetch
+MY_USER = verifiedUser
+MY_USER.country = "Unknown"
+MY_USER.countryCode = ""
+MY_USER.connectedAt = tick()
+
+fetchCountry(function(name, code)
+    MY_USER.country = name or "Unknown"
+    MY_USER.countryCode = code or ""
+end)
+
 showVerifiedScreen(verifiedUser)
+
 --==================== DRAG / RESIZE ====================
 function makeDraggable(frame, handle)
     local dragging, sPos, fPos = false, nil, nil
@@ -1258,7 +1352,9 @@ function makeResizable(frame, opts)
             end
         end)
     end
-end--==================== ESP colour logic ====================
+end
+
+--==================== ESP colour logic ====================
 function isAlly(p)
     if p == LP then return true end
     if LP.Team and p.Team then return LP.Team == p.Team end
@@ -2101,15 +2197,76 @@ function buildSakura()
 end
 buildSakura()
 
-header = tPanel2(new("Frame", {Size = UDim2.new(1, 0, 0, 40),
+--==================== HEADER (with avatar + discord + country + timer) ====================
+header = tPanel2(new("Frame", {Size = UDim2.new(1, 0, 0, 60),
     BackgroundColor3 = Theme.panel2, BorderSizePixel = 0, ZIndex = 31}, menu))
 corner(header, 14)
 grad(header, Color3.fromRGB(30, 62, 112), Color3.fromRGB(6, 10, 22), 90)
 new("Frame", {Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 1, -2),
     BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 32}, header)
-tAcc2(new("TextLabel", {Size = UDim2.fromOffset(260, 40), Position = UDim2.fromOffset(14, 0),
+
+tAcc2(new("TextLabel", {Size = UDim2.fromOffset(150, 60), Position = UDim2.fromOffset(14, 0),
     BackgroundTransparency = 1, Text = "REAPER", Font = Enum.Font.GothamBlack,
-    TextSize = 15, TextColor3 = Theme.accent2, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 32}, header))
+    TextSize = 18, TextColor3 = Theme.accent2, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Center, ZIndex = 32}, header))
+
+local _avSize = 40
+local _avWrap = new("Frame", {Size = UDim2.fromOffset(_avSize, _avSize),
+    Position = UDim2.new(1, -350, 0.5, -20), BackgroundTransparency = 1, ZIndex = 33}, header)
+local _avImg = new("ImageLabel", {Size = UDim2.fromScale(1, 1),
+    BackgroundColor3 = Theme.panel3, BorderSizePixel = 0, Image = "", ZIndex = 34}, _avWrap)
+corner(_avImg, _avSize / 2)
+local _avLetter = new("TextLabel", {Size = UDim2.fromScale(1, 1),
+    BackgroundTransparency = 1, Text = "?", Font = Enum.Font.GothamBlack, TextSize = 18,
+    TextColor3 = Color3.new(1,1,1), ZIndex = 35}, _avWrap)
+local _avBorder = new("Frame", {Size = UDim2.fromScale(1, 1),
+    BackgroundTransparency = 1, ZIndex = 36}, _avWrap)
+corner(_avBorder, _avSize / 2)
+tAcc(stroke(_avBorder, Theme.accent, 1.6, 0.15))
+
+local _nameLbl = new("TextLabel", {Size = UDim2.new(0, 250, 0, 18),
+    Position = UDim2.new(1, -304, 0.5, -20), BackgroundTransparency = 1,
+    Text = "@loading…", Font = Enum.Font.GothamBold, TextSize = 12,
+    TextColor3 = Theme.accent2, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Center, ZIndex = 33}, header)
+local _metaLbl = new("TextLabel", {Size = UDim2.new(0, 250, 0, 14),
+    Position = UDim2.new(1, -304, 0.5, 0), BackgroundTransparency = 1,
+    Text = "🌍 —   ⏱ 00:00:00", Font = Enum.Font.Gotham, TextSize = 10,
+    TextColor3 = Theme.muted, TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Center, ZIndex = 33}, header)
+
+task.spawn(function()
+    local lastAvatarAttempt = 0
+    while _nameLbl.Parent do
+        if MY_USER then
+            _nameLbl.Text = "@" .. (MY_USER.username or "user")
+            if MY_USER.avatar and MY_USER.avatar ~= "" and _avImg.Image == "" then
+                local now = tick()
+                if now - lastAvatarAttempt > 3 then
+                    lastAvatarAttempt = now
+                    local asset = downloadAvatar(MY_USER.avatar)
+                    if asset then
+                        _avImg.Image = asset
+                        _avImg.ScaleType = Enum.ScaleType.Crop
+                        _avLetter.Visible = false
+                    end
+                end
+            end
+            if _avLetter.Visible then
+                _avLetter.Text = (MY_USER.displayName or MY_USER.username or "?"):sub(1,1):upper()
+            end
+            local flag = flagEmoji(MY_USER.countryCode)
+            local elapsed = math.max(0, tick() - (MY_USER.connectedAt or tick()))
+            local hh = math.floor(elapsed / 3600)
+            local mm = math.floor((elapsed % 3600) / 60)
+            local ss = math.floor(elapsed % 60)
+            _metaLbl.Text = string.format("%s %s   ⏱ %02d:%02d:%02d",
+                flag, (MY_USER.country ~= "" and MY_USER.country) or "—", hh, mm, ss)
+        end
+        task.wait(0.5)
+    end
+end)
+
 closeBtn = new("TextButton", {Size = UDim2.fromOffset(24, 24),
     Position = UDim2.new(1, -34, 0, 8), BackgroundColor3 = Theme.danger, Text = "✕",
     Font = Enum.Font.GothamBold, TextSize = 12, TextColor3 = Color3.new(1,1,1),
@@ -2120,7 +2277,7 @@ closeBtn.MouseButton1Click:Connect(function() closeMenu() end)
 --==================== TICKER ====================
 TICKER_HEIGHT = 32
 tickerBar = tPanel(new("Frame", {Size = UDim2.new(1, -20, 0, TICKER_HEIGHT),
-    Position = UDim2.fromOffset(10, 46), BackgroundColor3 = Theme.panel,
+    Position = UDim2.fromOffset(10, 66), BackgroundColor3 = Theme.panel,
     BackgroundTransparency = 0.15, BorderSizePixel = 0, ClipsDescendants = true, ZIndex = 31}, menu))
 corner(tickerBar, 8)
 grad(tickerBar, Color3.fromRGB(10, 16, 30), Color3.fromRGB(4, 6, 14), 90)
@@ -2173,8 +2330,8 @@ task.spawn(function()
     end
 end)
 
-rail = tPanel(new("Frame", {Size = UDim2.new(0, 130, 1, -128),
-    Position = UDim2.fromOffset(10, 86), BackgroundColor3 = Theme.panel,
+rail = tPanel(new("Frame", {Size = UDim2.new(0, 130, 1, -148),
+    Position = UDim2.fromOffset(10, 106), BackgroundColor3 = Theme.panel,
     BackgroundTransparency = 0.05, BorderSizePixel = 0, ZIndex = 31}, menu))
 corner(rail, 10)
 new("UIListLayout", {Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder}, rail)
@@ -2184,8 +2341,8 @@ tabIndicator = new("Frame", {Size = UDim2.new(1, -12, 0, 28),
     BackgroundTransparency = 0.82, BorderSizePixel = 0, ZIndex = 31}, rail)
 corner(tabIndicator, 6)
 new("UIGradient", {Color = ColorSequence.new(Theme.accent, Theme.accent3)}, tabIndicator)
-content = tPanel(new("Frame", {Size = UDim2.new(1, -158, 1, -128),
-    Position = UDim2.fromOffset(148, 86), BackgroundColor3 = Theme.panel,
+content = tPanel(new("Frame", {Size = UDim2.new(1, -158, 1, -148),
+    Position = UDim2.fromOffset(148, 106), BackgroundColor3 = Theme.panel,
     BackgroundTransparency = 0.05, BorderSizePixel = 0, ZIndex = 31}, menu))
 corner(content, 10)
 status = tPanel(new("Frame", {Size = UDim2.new(1, -20, 0, 20),
@@ -2225,9 +2382,7 @@ function closeMenu()
     else
         menu.Visible = false
     end
-end
-
---==================== WIDGETS ====================
+end--==================== WIDGETS ====================
 pages = {}; tabs = {}; widgets = {}
 toggleLabels = {}
 pendingKeybind = nil
@@ -2875,7 +3030,7 @@ do
     end)
 
     section(pg2, "REAPER CHAT", "💬")
-    local chatHolder = tPanel(new("Frame", {Size = UDim2.new(1, 0, 0, 240),
+    local chatHolder = tPanel(new("Frame", {Size = UDim2.new(1, 0, 0, 260),
         BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.1,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2]))
     corner(chatHolder, 8)
@@ -2885,7 +3040,7 @@ do
         ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.accent,
         CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
         ZIndex = 34}, chatHolder)
-    new("UIListLayout", {Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder}, chatScroll)
+    new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, chatScroll)
     new("UIPadding", {PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4),
         PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, chatScroll)
 
@@ -2927,18 +3082,64 @@ do
         AutoButtonColor = false, ZIndex = 35}, inputBar)
     corner(sendBtn, 4)
 
+    -- Rich chat row with discord avatar
     local function addRow(e)
         if not chatScroll.Parent then return end
-        local row = new("Frame", {Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1,
-            AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = (#chatScroll:GetChildren()) + 1, ZIndex = 35}, chatScroll)
-        local lbl = new("TextLabel", {Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1,
+        local row = new("Frame", {Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1,
+            LayoutOrder = (#chatScroll:GetChildren()) + 1, ZIndex = 35}, chatScroll)
+        -- Avatar
+        local avWrap = new("Frame", {Size = UDim2.fromOffset(32, 32),
+            Position = UDim2.fromOffset(0, 2), BackgroundTransparency = 1, ZIndex = 36}, row)
+        local avImg = new("ImageLabel", {Size = UDim2.fromScale(1, 1),
+            BackgroundColor3 = Theme.panel2, BorderSizePixel = 0, Image = "",
+            ZIndex = 36}, avWrap)
+        corner(avImg, 16)
+        local avLetter = new("TextLabel", {Size = UDim2.fromScale(1, 1),
+            BackgroundTransparency = 1, Text = (e.sender or "?"):sub(1,1):upper(),
+            Font = Enum.Font.GothamBlack, TextSize = 14, TextColor3 = Color3.new(1,1,1),
+            ZIndex = 37}, avWrap)
+        local avBorder = new("Frame", {Size = UDim2.fromScale(1, 1),
+            BackgroundTransparency = 1, ZIndex = 38}, avWrap)
+        corner(avBorder, 16)
+        stroke(avBorder, e.col or Theme.accent, 1.4, 0.15)
+
+        -- If we have a discord avatar URL, download async
+        if e.avatar and e.avatar ~= "" then
+            task.spawn(function()
+                local asset = getChatAvatarAsset(e.avatar)
+                if asset and avImg.Parent then
+                    avImg.Image = asset
+                    avImg.ScaleType = Enum.ScaleType.Crop
+                    avLetter.Visible = false
+                end
+            end)
+        end
+
+        -- Text content
+        local textHolder = new("Frame", {Size = UDim2.new(1, -40, 0, 0),
+            Position = UDim2.fromOffset(40, 0), BackgroundTransparency = 1,
+            AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 36}, row)
+        -- Header line: discord name + country flag
+        local flag = flagEmoji(e.countryCode)
+        local headTxt = string.format('<font color="#8FA6BE">%s</font>  <font color="#%s"><b>%s</b></font>  <font color="#8FA6BE">%s</font>',
+            os.date("%H:%M", math.floor(e.time or tick())),
+            (e.col or Color3.fromRGB(140, 200, 255)):ToHex(),
+            (e.discordName and e.discordName ~= "" and ("@"..e.discordName)) or e.sender,
+            flag .. (e.country and e.country ~= "" and ("  "..e.country) or ""))
+        local headLbl = new("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
+            RichText = true, Font = Enum.Font.GothamBold, TextSize = 10,
+            TextColor3 = Theme.muted, TextXAlignment = Enum.TextXAlignment.Left,
+            Text = headTxt, ZIndex = 37}, textHolder)
+        -- Body line
+        local bodyLbl = new("TextLabel", {Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1,
             TextWrapped = true, AutomaticSize = Enum.AutomaticSize.Y, Font = Enum.Font.Gotham,
             TextSize = 11, TextColor3 = Theme.text, RichText = true,
-            TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 36}, row)
-        local hex = e.col:ToHex()
-        local tm = os.date("%H:%M", math.floor(e.time))
-        lbl.Text = string.format('<font color="#8FA6BE">[%s]</font> <font color="#%s"><b>%s</b></font> <font color="#8FA6BE">:</font> %s',
-            tm, hex, e.sender, e.text)
+            TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+            Position = UDim2.fromOffset(0, 14), Text = e.text or "", ZIndex = 37}, textHolder)
+
+        -- Make row height match
+        row.AutomaticSize = Enum.AutomaticSize.Y
+
         task.defer(function()
             chatScroll.CanvasPosition = Vector2.new(0, math.max(0, chatScroll.AbsoluteCanvasSize.Y))
         end)
@@ -3727,44 +3928,37 @@ do
         end)
     end)
 espData = {}
-end--==================== ROLE ESP (MURDERER / SHERIFF DETECTION) ====================
-local roleCache = {} -- Tracks role by UserId
-local roleCheckConnection = nil
+end
 
+--==================== ROLE ESP (MURDERER / SHERIFF DETECTION) ====================
+local roleCache = {}
 local function getRoleColor(role)
     if role == "Murderer" then return Color3.fromRGB(220, 40, 40) end
     if role == "Sheriff" then return Color3.fromRGB(60, 140, 255) end
-    return Color3.fromRGB(90, 220, 120) -- Innocent
+    return Color3.fromRGB(90, 220, 120)
 end
-
 local function getRoleName(role)
     if role == "Murderer" then return "[MURDERER]" end
     if role == "Sheriff" then return "[SHERIFF]" end
     return "[INNOCENT]"
 end
-
 local function detectRole(player)
     local char = player.Character
     if not char then return "Innocent" end
-    -- Check for Knife (Murderer) or Gun (Sheriff/Hero)
-    -- Also check in backpack in case it's holstered
     local hasKnife = char:FindFirstChild("Knife") or (player.Backpack and player.Backpack:FindFirstChild("Knife"))
     local hasGun = char:FindFirstChild("Gun") or (player.Backpack and player.Backpack:FindFirstChild("Gun"))
     if hasKnife then return "Murderer" end
     if hasGun then return "Sheriff" end
     return "Innocent"
 end
-
 local function updateAllRoleESP()
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LP then
             local role = detectRole(player)
             roleCache[player.UserId] = role
-            -- Update existing ESP if present
             local data = espData[player]
             if data and data.hl then
                 local base = getRoleColor(role)
-                local outline = espOutline(player) -- Fallback, will use role color if mode is Role
                 data.hl.FillColor = base
                 data.hl.OutlineColor = Color3.new(base.R * 1.2, base.G * 1.2, base.B * 1.2)
                 if data.roleLbl then
@@ -3775,8 +3969,6 @@ local function updateAllRoleESP()
         end
     end
 end
-
--- Start role detection loop (every 1 second)
 task.spawn(function()
     while gui and gui.Parent do
         updateAllRoleESP()
@@ -3785,7 +3977,6 @@ task.spawn(function()
 end)
 
 --==================== ESP ====================
-
 function removeESP(p)
     local d = espData[p]
     if d then
@@ -3807,7 +3998,6 @@ RS.Heartbeat:Connect(function()
                 local h = ch and ch:FindFirstChildOfClass("Humanoid")
                 local head = ch and ch:FindFirstChild("Head")
                 if ch and h and h.Health > 0 and head then
-                    -- Determine color based on mode
                     local base, outline, roleL
                     if Cfg.Visuals.Mode == "Role" then
                         local role = roleCache[p.UserId] or "Innocent"
