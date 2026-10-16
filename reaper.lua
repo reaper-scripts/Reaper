@@ -1,12 +1,9 @@
 -- REAPER — universal cheat suite. @d9vq on discord.
 -- Client is fully self-sufficient — no server relay needed.
--- (Server half kept for optional use; you can ignore it if you don't have Studio access.)
 
 local RS0 = game:GetService("RunService")
 
 --==================== OPTIONAL SERVER HALF ====================
--- This only runs if you paste it into ServerScriptService in Studio.
--- The client half works WITHOUT this.
 if RS0:IsServer() then
     local Players = game:GetService("Players")
     local RS = game:GetService("ReplicatedStorage")
@@ -22,14 +19,7 @@ if RS0:IsServer() then
 
     local users = {}
     local TIMEOUT = 30
-    local VERIFY_CACHE = {}
 
-    local function prune()
-        local now = tick()
-        for p, d in pairs(users) do
-            if now - d.lastSeen > TIMEOUT or not p.Parent then users[p] = nil end
-        end
-    end
     local function list()
         local t = {}
         for p in pairs(users) do if p.Parent then t[#t+1] = p.Name end end
@@ -44,32 +34,22 @@ if RS0:IsServer() then
             end
         end
     end
-
     local function fetchRankMap()
         local ids = {}
         for _, p in ipairs(Players:GetPlayers()) do ids[#ids+1] = tostring(p.UserId) end
         if #ids == 0 then return {} end
         local ok, res = pcall(function()
-            return HttpService:PostAsync(
-                KEY_API .. "/lookup",
+            return HttpService:PostAsync(KEY_API .. "/lookup",
                 HttpService:JSONEncode({robloxIds = ids}),
-                Enum.HttpContentType.ApplicationJson
-            )
+                Enum.HttpContentType.ApplicationJson)
         end)
         if not ok or not res then return {} end
         local okD, data = pcall(function() return HttpService:JSONDecode(res) end)
         if not okD or type(data) ~= "table" then return {} end
         return data.users or {}
     end
-
-    local ranksDirty = false
     local function scheduleBroadcastRanks()
-        if ranksDirty then return end
-        ranksDirty = true
-        task.delay(0.6, function()
-            ranksDirty = false
-            bcast("rankMap", fetchRankMap())
-        end)
+        task.delay(0.6, function() bcast("rankMap", fetchRankMap()) end)
     end
 
     remote.OnServerEvent:Connect(function(plr, channel, payload)
@@ -88,7 +68,6 @@ if RS0:IsServer() then
 
     Players.PlayerRemoving:Connect(function(p)
         users[p] = nil
-        VERIFY_CACHE[p.UserId] = nil
         bcast("userCount", #list(), list())
         scheduleBroadcastRanks()
     end)
@@ -97,13 +76,17 @@ if RS0:IsServer() then
     end)
 
     task.spawn(function()
-        while true do task.wait(5); prune() end
+        while true do task.wait(5); local now = tick()
+            for p, d in pairs(users) do
+                if now - d.lastSeen > TIMEOUT or not p.Parent then users[p] = nil end
+            end
+        end
     end)
     task.spawn(function()
         while true do task.wait(45); scheduleBroadcastRanks() end
     end)
 
-    print("[REAPER SERVER] optional relay up (client works without this)")
+    print("[REAPER SERVER] optional relay up")
     return
 end
 
@@ -137,7 +120,6 @@ local HttpService = game:GetService("HttpService")
 local LP = Players.LocalPlayer
 local Cam = workspace.CurrentCamera
 
--- file IO detection
 IO = {has = false, reason = "none"}
 do
     local function check(env)
@@ -242,7 +224,7 @@ end
 function isMod() return getLocalRank() ~= nil end
 function isOwner() return getLocalRank() == "owner" end
 
---==================== COUNTRY + AVATAR CACHE ====================
+--==================== COUNTRY + AVATAR ====================
 function flagEmoji(code)
     if not code or #code ~= 2 then return "🌍" end
     code = code:upper()
@@ -304,7 +286,7 @@ function getChatAvatarAsset(url)
     return nil
 end
 
---==================== THEME (black + dark purple, compact) ====================
+--==================== THEME ====================
 Theme = {
     bg        = Color3.fromRGB(4, 3, 9),
     bgDeep    = Color3.fromRGB(2, 1, 5),
@@ -429,7 +411,7 @@ function sendChat(text)
         })
         local ok, res = httpPost(KEY_API .. "/chat/send", body)
         if not ok then
-            notify("Chat failed", tostring(res), Theme.danger, 3)
+            notify("Chat failed", tostring(res), Theme.danger, 5, tostring(res))
         end
     end)
     return true
@@ -1391,19 +1373,23 @@ function hoverStripe(parent, col)
     parent.MouseLeave:Connect(function() Tween:Create(s, TweenInfo.new(0.15), {BackgroundTransparency = 1}):Play() end)
 end
 
---==================== NOTIFS ====================
+--==================== NOTIFS (with copy button) ====================
 function initNotifs(pg)
     notifGui = new("ScreenGui", {Name = "ReaperNotif", ResetOnSpawn = false,
         IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 9996}, pg)
-    notifStack = new("Frame", {Size = UDim2.new(0, 300, 1, -40),
-        Position = UDim2.new(1, -310, 0, 20), BackgroundTransparency = 1, ZIndex = 1}, notifGui)
+    notifStack = new("Frame", {Size = UDim2.new(0, 320, 1, -40),
+        Position = UDim2.new(1, -330, 0, 20), BackgroundTransparency = 1, ZIndex = 1}, notifGui)
     new("UIListLayout", {Padding = UDim.new(0, 8), SortOrder = Enum.SortOrder.LayoutOrder,
         HorizontalAlignment = Enum.HorizontalAlignment.Right,
         VerticalAlignment = Enum.VerticalAlignment.Top}, notifStack)
 end
-function notify(title, msg, col, dur)
+
+function notify(title, msg, col, dur, copyText)
     if not Cfg.UI.Notifs or not notifStack then return end
     col = col or Theme.accent
+    local hasCopy = type(copyText) == "string" and copyText ~= ""
+    local cardH = hasCopy and 86 or 68
+
     local card = new("Frame", {Size = UDim2.new(1, 0, 0, 0),
         BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.08,
         BorderSizePixel = 0, ZIndex = 2, ClipsDescendants = true}, notifStack)
@@ -1419,11 +1405,45 @@ function notify(title, msg, col, dur)
         BackgroundTransparency = 1, Text = msg or "", Font = Enum.Font.Gotham,
         TextSize = 11, TextColor3 = Theme.text, TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, ZIndex = 3}, card)
+
+    local copyBtn
+    if hasCopy then
+        copyBtn = new("TextButton", {Size = UDim2.new(1, -28, 0, 20),
+            Position = UDim2.fromOffset(20, cardH - 26),
+            BackgroundColor3 = Theme.panel2, Text = "📋  COPY ERROR",
+            Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = Theme.accent2,
+            AutoButtonColor = false, ZIndex = 4}, card)
+        corner(copyBtn, 6)
+        local cStroke = stroke(copyBtn, col, 1, 0.3)
+        copyBtn.MouseEnter:Connect(function()
+            Tween:Create(copyBtn, TweenInfo.new(0.12), {BackgroundColor3 = Theme.panel3}):Play()
+            Tween:Create(cStroke, TweenInfo.new(0.12), {Transparency = 0}):Play()
+        end)
+        copyBtn.MouseLeave:Connect(function()
+            Tween:Create(copyBtn, TweenInfo.new(0.15), {BackgroundColor3 = Theme.panel2}):Play()
+            Tween:Create(cStroke, TweenInfo.new(0.15), {Transparency = 0.3}):Play()
+        end)
+        copyBtn.MouseButton1Click:Connect(function()
+            if type(setclipboard) == "function" then
+                pcall(setclipboard, copyText)
+                copyBtn.Text = "✓ COPIED"
+                task.delay(1, function()
+                    if copyBtn and copyBtn.Parent then copyBtn.Text = "📋  COPY ERROR" end
+                end)
+            else
+                copyBtn.Text = "no clipboard api"
+            end
+        end)
+    end
+
     card.Position = UDim2.new(1, 60, 0, 0)
     Tween:Create(card, TweenInfo.new(0.45, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
-        {Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, 68)}):Play()
+        {Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, cardH)}):Play()
     shine(card, col, 0.7)
-    task.delay(dur or 3.5, function()
+
+    -- Auto-dismiss: if copy button exists, give a longer window (12s)
+    local lifetime = dur or (hasCopy and 12 or 3.5)
+    task.delay(lifetime, function()
         if not card or not card.Parent then return end
         local t = Tween:Create(card, TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
             {Position = UDim2.new(1, 60, 0, 0), BackgroundTransparency = 1})
@@ -1553,7 +1573,7 @@ gui = new("ScreenGui", {Name = "ReaperUI", ResetOnSpawn = false,
     IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 9999}, pg)
 initNotifs(pg)
 
---==================== ANNOUNCEMENTS (fixed — no more screen glitch) ====================
+--==================== ANNOUNCEMENTS ====================
 annGui = new("ScreenGui", {Name = "ReaperAnnounce", ResetOnSpawn = false,
     IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 10001}, pg)
 annSlot = new("Frame", {Size = UDim2.new(0, 520, 0, 0),
@@ -1565,7 +1585,6 @@ function dismissAnnouncement()
     local c = annCurrent
     if not c then return end
     annCurrent = nil
-    -- kill shadow FIRST so it can't linger
     if c.shadow and c.shadow.Parent then c.shadow:Destroy() end
     if c.card and c.card.Parent then
         local t = Tween:Create(c.card, TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
@@ -1600,7 +1619,6 @@ function showAnnouncement(data)
     local headerH = 60
     local cardHeight = headerH + bodyHeight + 18
 
-    -- Shadow created FIRST so it sits behind the card, and parented to annSlot
     local shadow = new("Frame", {
         Size = UDim2.fromOffset(cardWidth + 14, cardHeight + 14),
         Position = UDim2.fromOffset(-7, -160),
@@ -1648,7 +1666,6 @@ function showAnnouncement(data)
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 5}, card)
 
-    -- Slide in together
     Tween:Create(card, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
         {Position = UDim2.new(0, 0, 0, 0)}):Play()
     Tween:Create(shadow, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
@@ -1687,7 +1704,7 @@ function sendAnnouncement(text)
     text = tostring(text or ""):gsub("^%s+",""):gsub("%s+$","")
     if text == "" then return false end
     if not SESSION_KEY or SESSION_KEY == "" then
-        notify("Announce", "Not verified yet", Theme.danger, 3)
+        notify("Announce", "Not verified yet", Theme.danger, 5)
         return false
     end
     task.spawn(function()
@@ -1698,10 +1715,19 @@ function sendAnnouncement(text)
         })
         local ok, res = httpPost(KEY_API .. "/announce/send", body)
         if ok then
-            -- success — no local echo, the poll loop will fetch it
             notify("Announcement sent", "Broadcast to all servers", Theme.success, 3)
         else
-            notify("Announce failed", tostring(res), Theme.danger, 4)
+            local reason
+            if type(res) == "table" then
+                reason = res.Body or res.body or res.Data or tostring(res)
+            else
+                reason = tostring(res)
+            end
+            -- extract the useful JSON error if possible
+            local decoded
+            pcall(function() decoded = HttpService:JSONDecode(reason) end)
+            local pretty = decoded and decoded.error and ("worker: "..tostring(decoded.error)) or tostring(reason)
+            notify("Announce failed", pretty, Theme.danger, 5, pretty)
         end
     end)
     return true
@@ -2025,7 +2051,7 @@ logo.MouseLeave:Connect(function()
     Tween:Create(backStroke, TweenInfo.new(0.15), {Transparency = 0.2}):Play()
 end)
 
---==================== MENU (compact, dark purple) ====================
+--==================== MENU ====================
 menu = tBg(new("Frame", {Name = "Menu", Size = UDim2.fromOffset(660, 500),
     Position = UDim2.new(0.5, -330, 0.5, -250), BackgroundColor3 = Theme.bg,
     BorderSizePixel = 0, ClipsDescendants = true, Visible = false, ZIndex = 30}, gui))
@@ -3016,7 +3042,7 @@ do
         BorderSizePixel = 0, ZIndex = 35}, userBar)
     corner(liveDot, 3)
     local userLbl = new("TextLabel", {Size = UDim2.new(1, -30, 1, 0), Position = UDim2.fromOffset(18, 0),
-        BackgroundTransparency = 1, Text = "● live · global",
+        BackgroundTransparency = 1, Text = "● live · global · polling 4s",
         Font = Enum.Font.GothamBold, TextSize = 9, TextColor3 = Theme.success,
         TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 35}, userBar)
     task.spawn(function()
@@ -3142,7 +3168,7 @@ do
     sendBtn.MouseButton1Click:Connect(trySend)
     chatInput.FocusLost:Connect(function(enter) if enter then trySend() end end)
 
-    -- Direct worker polling for chat (no server relay)
+    -- Client-direct chat polling
     task.spawn(function()
         local lastChatId = 0
         while gui and gui.Parent do
@@ -3204,7 +3230,8 @@ do
                 fbInput.Text = ""
                 notify("Feedback sent", "Thanks", Theme.success, 3)
             else
-                notify("Feedback failed", tostring(res), Theme.danger, 4)
+                local reason = tostring(res)
+                notify("Feedback failed", reason, Theme.danger, 5, reason)
             end
         end)
         pulse(fbSend, 0.94, 0.06)
@@ -3212,7 +3239,7 @@ do
     end)
 end
 
---====================== OWNER (staff-only) ======================
+--====================== OWNER ======================
 if isMod() then
     local pg2 = "owner"
 
@@ -3293,17 +3320,16 @@ if isMod() then
         end
         task.spawn(function()
             local body = HttpService:JSONEncode({
-                robloxId = tostring(LP.UserId),
-                key = SESSION_KEY or "",
-                targetDiscordId = target,
-                reason = reasonBox.Text or "",
+                robloxId = tostring(LP.UserId), key = SESSION_KEY or "",
+                targetDiscordId = target, reason = reasonBox.Text or "",
             })
             local ok, res = httpPost(KEY_API .. "/chat/ban", body)
             if ok then
                 notify("Banned", target, Theme.success, 3)
                 reasonBox.Text = ""
             else
-                notify("Ban failed", tostring(res), Theme.danger, 3)
+                local reason = tostring(res)
+                notify("Ban failed", reason, Theme.danger, 5, reason)
             end
         end)
     end)
@@ -3314,15 +3340,15 @@ if isMod() then
         end
         task.spawn(function()
             local body = HttpService:JSONEncode({
-                robloxId = tostring(LP.UserId),
-                key = SESSION_KEY or "",
+                robloxId = tostring(LP.UserId), key = SESSION_KEY or "",
                 targetDiscordId = target,
             })
             local ok, res = httpPost(KEY_API .. "/chat/unban", body)
             if ok then
                 notify("Unbanned", target, Theme.success, 3)
             else
-                notify("Unban failed", tostring(res), Theme.danger, 3)
+                local reason = tostring(res)
+                notify("Unban failed", reason, Theme.danger, 5, reason)
             end
         end)
     end)
@@ -3346,8 +3372,7 @@ if isMod() then
         end
         task.spawn(function()
             local body = HttpService:JSONEncode({
-                robloxId = tostring(LP.UserId),
-                key = SESSION_KEY or "",
+                robloxId = tostring(LP.UserId), key = SESSION_KEY or "",
                 messageId = id,
             })
             local ok, res = httpPost(KEY_API .. "/chat/delete", body)
@@ -3360,7 +3385,8 @@ if isMod() then
                     end
                 end
             else
-                notify("Delete failed", tostring(res), Theme.danger, 3)
+                local reason = tostring(res)
+                notify("Delete failed", reason, Theme.danger, 5, reason)
             end
         end)
     end)
@@ -3413,8 +3439,7 @@ if isMod() then
     buttonRow(pg2, "Refresh ban list", "REFRESH BANS", function()
         task.spawn(function()
             local body = HttpService:JSONEncode({
-                robloxId = tostring(LP.UserId),
-                key = SESSION_KEY or "",
+                robloxId = tostring(LP.UserId), key = SESSION_KEY or "",
             })
             local ok, res = httpPost(KEY_API .. "/chat/bans", body)
             if ok and type(res) == "table" then
@@ -3423,6 +3448,9 @@ if isMod() then
                 if okD and data and data.bans and _G.__REAPER_BANLIST_CB then
                     _G.__REAPER_BANLIST_CB(data.bans)
                 end
+            else
+                local reason = tostring(res)
+                notify("Ban list failed", reason, Theme.danger, 5, reason)
             end
         end)
     end)
@@ -3949,16 +3977,13 @@ task.defer(function()
             local v = getPath(Cfg, p)
             if v ~= nil then pcall(w.set, v, false) end
         end
-        applyTheme()
-        applyOpacity(Cfg.UI.MenuOpacity or 0)
-        pcall(refreshHUD)
-        pcall(refreshAD)
-        rebuildChips()
+        applyTheme(); applyOpacity(Cfg.UI.MenuOpacity or 0)
+        pcall(refreshHUD); pcall(refreshAD); rebuildChips()
         notify("Autoloaded", autoloadName, Theme.success)
     end
 end)
 
--- Announcement polling (client-direct, no relay)
+-- Announcement polling
 task.spawn(function()
     local lastAnnId = 0
     while gui and gui.Parent do
@@ -3969,7 +3994,6 @@ task.spawn(function()
             if okD and type(data) == "table" and data.announcements then
                 for _, m in ipairs(data.announcements) do
                     if m.id and m.id > lastAnnId then lastAnnId = m.id end
-                    -- don't re-show our own (we just saw the success notification)
                     if tostring(m.userId) ~= tostring(LP.UserId) then
                         showAnnouncement(m)
                     end
@@ -4230,16 +4254,6 @@ local function updateAllRoleESP()
         if player ~= LP then
             local role = detectRole(player)
             roleCache[player.UserId] = role
-            local data = espData[player]
-            if data and data.hl then
-                local base = getRoleColor(role)
-                data.hl.FillColor = base
-                data.hl.OutlineColor = Color3.new(base.R * 1.2, base.G * 1.2, base.B * 1.2)
-                if data.roleLbl then
-                    data.roleLbl.Text = getRoleName(role)
-                    data.roleLbl.TextColor3 = base
-                end
-            end
         end
     end
 end
@@ -4739,7 +4753,6 @@ RS.Heartbeat:Connect(function(dt)
             end
         end
 
-        --===== HUMP ENGINE =====
         if Cfg.Troll.Hump then
             local t = TS.target or getTargetPlayer()
             if t then
