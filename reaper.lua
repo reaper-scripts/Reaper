@@ -300,7 +300,7 @@ function httpPost(url, body)
     return true, res
 end
 
---==================== THEME (polished) ====================
+--==================== THEME ====================
 Theme = {
     bg        = Color3.fromRGB(5, 7, 14),
     bgDeep    = Color3.fromRGB(2, 3, 8),
@@ -389,13 +389,21 @@ HR = {
     autoMode = "Hybrid", fallingUnder = false, lastGood = nil,
     respawnPending = false,
 }
--- HUMP tuner state (fixes the fast/slow oscillation)
+-- HUMP state — auto values are kept separate from Cfg so the slider isn't overwritten
 HUMP = {
-    phase = 0,          -- accumulated phase (NOT tick()*speed)
-    smoothVel = 0,      -- exponential smoothed target speed
-    smoothAir = 0,      -- smoothed airborne 0-1
+    phase = 0,
+    smoothVel = 0,
+    smoothAir = 0,
     lastTier = "STILL",
-    lockTimer = 0,      -- keeps values stable when target stands still
+    lockTimer = 0,
+    -- effective values used when AutoDetect is ON
+    effSpeed = 8,
+    effAmp = 1.5,
+    effDist = 1.6,
+    -- fall / respawn handling
+    fallHold = 0,
+    lastGoodCF = nil,
+    awaitingRespawn = false,
 }
 RA = {
     keys = {teleport = nil, spectate = nil, hump = nil},
@@ -557,6 +565,7 @@ Cfg = {
         Hump = false, HumpSpeed = 8, HumpAmp = 1.5, HumpDist = 1.6,
         HumpYawOnly = false, HumpKeepOwner = true, HumpUsePlatform = false,
         HumpOverrideFly = true, HumpVelMatch = true, HumpAutoDetect = true,
+        HumpFallProtect = true,
         TapTarget = false, TapRadius = 30,
     },
     UI = {
@@ -594,7 +603,6 @@ end
 function grad(i, c1, c2, rot)
     return new("UIGradient", {Color = ColorSequence.new(c1, c2), Rotation = rot or 90}, i)
 end
--- Soft drop shadow behind a frame (visually polished)
 function dropShadow(parent, radius, spread, transparency)
     local sh = new("Frame", {
         Size = UDim2.new(1, spread or 12, 1, spread or 12),
@@ -709,7 +717,7 @@ local function downloadAvatar(url)
     return nil
 end
 
---==================== WELCOME SCREEN (polished) ====================
+--==================== WELCOME SCREEN ====================
 local function showVerifiedScreen(user)
     local pg = LP:WaitForChild("PlayerGui")
     local existing = pg:FindFirstChild("ReaperVerified")
@@ -718,12 +726,10 @@ local function showVerifiedScreen(user)
     local sg = new("ScreenGui", {Name = "ReaperVerified", ResetOnSpawn = false,
         IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 20000}, pg)
 
-    -- layered backdrop
     local backdrop = new("Frame", {Size = UDim2.fromScale(1, 1),
         BackgroundColor3 = Color3.fromRGB(1, 2, 6), BackgroundTransparency = 0.18,
         BorderSizePixel = 0, ZIndex = 1}, sg)
 
-    -- slow color drift background
     local bgDrift = new("Frame", {Size = UDim2.fromScale(1.4, 1.4),
         Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.96,
@@ -766,7 +772,6 @@ local function showVerifiedScreen(user)
     grad(card, Color3.fromRGB(11, 15, 28), Color3.fromRGB(3, 5, 12), 90)
     dropShadow(card, 24, 18, 0.55)
 
-    -- animated outer ring
     local borderGlow = new("Frame", {Size = UDim2.new(1, 18, 1, 18),
         Position = UDim2.new(0.5, 0, 0.5, 0), AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Theme.success, BackgroundTransparency = 0.5,
@@ -788,7 +793,6 @@ local function showVerifiedScreen(user)
         end
     end)
 
-    -- inner top glow
     local topGlow = new("Frame", {Size = UDim2.new(1, -2, 0, 150),
         Position = UDim2.fromOffset(1, 1), BackgroundColor3 = Theme.accent,
         BackgroundTransparency = 0.93, BorderSizePixel = 0, ZIndex = 11}, card)
@@ -798,7 +802,6 @@ local function showVerifiedScreen(user)
         NumberSequenceKeypoint.new(1, 1),
     }), Rotation = 90}, topGlow)
 
-    -- avatar
     local avatarSize = 104
     local avatarWrap = new("Frame", {Size = UDim2.fromOffset(avatarSize, avatarSize),
         Position = UDim2.new(0.5, 0, 0, 36), AnchorPoint = Vector2.new(0.5, 0),
@@ -854,7 +857,6 @@ local function showVerifiedScreen(user)
     corner(avatarBorder, avatarSize / 2)
     stroke(avatarBorder, Theme.success, 2.6, 0.05)
 
-    -- online dot
     local dotOuter = new("Frame", {Size = UDim2.fromOffset(26, 26),
         Position = UDim2.new(1, -26, 1, -26), BackgroundColor3 = Theme.bg,
         BorderSizePixel = 0, ZIndex = 17}, avatarWrap)
@@ -864,7 +866,6 @@ local function showVerifiedScreen(user)
         BackgroundColor3 = Theme.success, BorderSizePixel = 0, ZIndex = 18}, dotOuter)
     corner(dotInner, 9)
 
-    -- name / handle
     local nameY = 36 + avatarSize + 18
     new("TextLabel", {Size = UDim2.new(1, -40, 0, 28),
         Position = UDim2.fromOffset(20, nameY), BackgroundTransparency = 1,
@@ -878,7 +879,6 @@ local function showVerifiedScreen(user)
         Font = Enum.Font.Gotham, TextSize = 13,
         TextColor3 = Theme.muted, ZIndex = 12}, card)
 
-    -- verified pill
     local pillW = 128
     local pill = new("Frame", {Size = UDim2.fromOffset(pillW, 22),
         Position = UDim2.new(0.5, -pillW/2, 0, nameY + 54),
@@ -890,7 +890,6 @@ local function showVerifiedScreen(user)
         Text = "● MEMBER VERIFIED", Font = Enum.Font.GothamBold, TextSize = 10,
         TextColor3 = Theme.success, ZIndex = 13}, pill)
 
-    -- load button
     local btnY = nameY + 92
     local loadBtn = new("TextButton", {Size = UDim2.new(1, -60, 0, 56),
         Position = UDim2.fromOffset(30, btnY), BackgroundColor3 = Theme.accent,
@@ -956,7 +955,7 @@ local function showVerifiedScreen(user)
     return true
 end
 
---==================== KEY PROMPT (polished) ====================
+--==================== KEY PROMPT ====================
 local function showKeyPrompt()
     local pg = LP:WaitForChild("PlayerGui")
     local existing = pg:FindFirstChild("ReaperKeyPrompt")
@@ -965,7 +964,6 @@ local function showKeyPrompt()
     local promptGui = new("ScreenGui", {Name = "ReaperKeyPrompt", ResetOnSpawn = false,
         IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 20000}, pg)
 
-    -- blur backdrop
     pcall(function()
         local b = new("BlurEffect", {Size = 18, Parent = Lighting})
         b.Name = "ReaperPromptBlur"
@@ -980,7 +978,6 @@ local function showKeyPrompt()
         BorderSizePixel = 0, ZIndex = 1}, promptGui)
     Tween:Create(backdrop, TweenInfo.new(0.4), {BackgroundTransparency = 0.35}):Play()
 
-    -- rotating glow behind card
     local bgGlow = new("Frame", {Size = UDim2.fromScale(1.2, 1.2),
         Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.96,
@@ -1005,7 +1002,6 @@ local function showKeyPrompt()
     grad(card, Color3.fromRGB(11, 15, 28), Color3.fromRGB(3, 5, 12), 90)
     dropShadow(card, 24, 20, 0.6)
 
-    -- animated outline
     local borderGlow = new("Frame", {Size = UDim2.new(1, 16, 1, 16),
         Position = UDim2.new(0.5, 0, 0.5, 0), AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.55,
@@ -1045,7 +1041,6 @@ local function showKeyPrompt()
         Text = "Complete both steps to unlock REAPER.",
         Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = Theme.muted, ZIndex = 12}, card)
 
-    -- STEP 1
     local s1 = new("Frame", {Size = UDim2.new(1, -60, 0, 120),
         Position = UDim2.fromOffset(30, 92), BackgroundColor3 = Theme.panel,
         BackgroundTransparency = 0.2, BorderSizePixel = 0, ZIndex = 12}, card)
@@ -1081,7 +1076,6 @@ local function showKeyPrompt()
     local invGrad = grad(invBtn, Theme.accent, Theme.accent3, 0)
     local invStroke = stroke(invBtn, Theme.accent2, 1.3, 0.3)
 
-    -- STEP 2
     local s2 = new("Frame", {Size = UDim2.new(1, -60, 0, 120),
         Position = UDim2.fromOffset(30, 222), BackgroundColor3 = Theme.panel,
         BackgroundTransparency = 0.2, BorderSizePixel = 0, ZIndex = 12}, card)
@@ -1117,7 +1111,6 @@ local function showKeyPrompt()
     local authGrad = grad(authBtn, Theme.accent, Theme.accent3, 0)
     local authStroke = stroke(authBtn, Theme.accent2, 1.3, 0.3)
 
-    -- status
     local statusWrap = new("Frame", {Size = UDim2.new(1, -60, 0, 64),
         Position = UDim2.fromOffset(30, 352), BackgroundColor3 = Theme.panel,
         BackgroundTransparency = 0.4, BorderSizePixel = 0, ZIndex = 12}, card)
@@ -1142,7 +1135,6 @@ local function showKeyPrompt()
         Tween:Create(statusStroke, TweenInfo.new(0.2), {Color = dcol or Theme.strokeSoft}):Play()
     end
 
-    -- progress
     local progWrap = new("Frame", {Size = UDim2.new(1, -60, 0, 6),
         Position = UDim2.fromOffset(30, 424), BackgroundColor3 = Theme.panel2,
         BorderSizePixel = 0, ZIndex = 12}, card)
@@ -1547,25 +1539,39 @@ function ripple(parent, x, y, col, sz, dur)
     t1:Play(); t2:Play()
     t1.Completed:Connect(function() r:Destroy() end)
 end
+
+-- FIXED: pulse no longer grows the element over repeated clicks.
+-- The original size is cached once on the instance and ALWAYS restored to.
 function pulse(inst, sc, dur)
     if not Cfg.UI.Juicy then return end
-    local o = inst.Size
-    local b = UDim2.new(o.X.Scale*(sc or 1.06), o.X.Offset*(sc or 1.06),
-        o.Y.Scale*(sc or 1.06), o.Y.Offset*(sc or 1.06))
-    Tween:Create(inst, TweenInfo.new(dur or 0.08), {Size = b}):Play()
-    task.delay(dur or 0.08, function()
+    if not inst or not inst.Parent then return end
+    local base = inst:GetAttribute("PulseBase")
+    if base == nil then
+        base = inst.Size
+        inst:SetAttribute("PulseBase", base)
+    end
+    local s = sc or 1.06
+    local b = UDim2.new(base.X.Scale*s, base.X.Offset*s, base.Y.Scale*s, base.Y.Offset*s)
+    -- cancel any in-flight size tween by killing existing tweens on Size
+    inst.Size = b
+    task.delay(dur or 0.09, function()
         if inst and inst.Parent then
-            Tween:Create(inst, TweenInfo.new(dur or 0.12, Enum.EasingStyle.Back), {Size = o}):Play()
+            Tween:Create(inst, TweenInfo.new(dur or 0.14, Enum.EasingStyle.Back), {Size = base}):Play()
         end
     end)
 end
+
 function flash(inst, col, dur)
     if not Cfg.UI.Juicy then return end
-    local o = inst.BackgroundColor3
+    local base = inst:GetAttribute("FlashBase")
+    if base == nil then
+        base = inst.BackgroundColor3
+        inst:SetAttribute("FlashBase", base)
+    end
     inst.BackgroundColor3 = col
     task.delay(dur or 0.1, function()
         if inst and inst.Parent then
-            Tween:Create(inst, TweenInfo.new(0.18), {BackgroundColor3 = o}):Play()
+            Tween:Create(inst, TweenInfo.new(0.18), {BackgroundColor3 = base}):Play()
         end
     end)
 end
@@ -1852,6 +1858,8 @@ function runAction(id)
         HUMP.smoothVel = 0
         HUMP.smoothAir = 0
         HUMP.lockTimer = 1.5
+        HUMP.awaitingRespawn = false
+        HUMP.fallHold = 0
         notify("Humping", t.Name, Theme.gold)
     end
 end
@@ -2032,25 +2040,22 @@ RS.RenderStepped:Connect(function(dt)
     end)
 end)
 
---==================== LOGO (polished) ====================
+--==================== LOGO ====================
 LW, LH = 180, 56
 logo = new("TextButton", {Name = "Logo", Size = UDim2.fromOffset(LW, LH),
     Position = UDim2.new(0.5, -LW/2, 0, 12), BackgroundTransparency = 1, Text = "",
     AutoButtonColor = false, ZIndex = 60}, gui)
--- outer aura
 aura = tAcc(new("Frame", {Size = UDim2.fromScale(1.08, 1.2),
     Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
     BackgroundColor3 = Theme.accent, BackgroundTransparency = 0.62,
     BorderSizePixel = 0, ZIndex = 1}, logo))
 corner(aura, 15)
--- main back
 back = tBg(new("Frame", {Size = UDim2.fromScale(1, 1),
     Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
     BackgroundColor3 = Theme.bg, BorderSizePixel = 0, ZIndex = 2}, logo))
 corner(back, 15); grad(back, Theme.panel, Theme.bg, 90)
 backStroke = tAcc(stroke(back, Theme.accent, 1.5, 0.2))
 dropShadow(back, 15, 10, 0.5)
--- ring outline
 ring = new("Frame", {Size = UDim2.fromScale(1, 1),
     Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
     BackgroundTransparency = 1, ZIndex = 3}, logo)
@@ -2061,7 +2066,6 @@ ringG = new("UIGradient", {Color = ColorSequence.new({
     ColorSequenceKeypoint.new(0.5, Color3.fromRGB(128, 88, 255)),
     ColorSequenceKeypoint.new(1, Color3.fromRGB(35, 195, 255)),
 }), Rotation = 0}, ring:FindFirstChildOfClass("UIStroke"))
--- icon plate
 plate = tPanel(new("Frame", {Size = UDim2.fromOffset(38, 38),
     Position = UDim2.new(0, 10, 0.5, -19), BackgroundColor3 = Theme.panel,
     BorderSizePixel = 0, ZIndex = 4}, back))
@@ -2114,7 +2118,7 @@ logo.MouseLeave:Connect(function()
     Tween:Create(backStroke, TweenInfo.new(0.15), {Transparency = 0.2}):Play()
 end)
 
---==================== MENU (polished) ====================
+--==================== MENU ====================
 menu = tBg(new("Frame", {Name = "Menu", Size = UDim2.fromOffset(780, 600),
     Position = UDim2.new(0.5, -390, 0.5, -300), BackgroundColor3 = Theme.bg,
     BorderSizePixel = 0, ClipsDescendants = true, Visible = false, ZIndex = 30}, gui))
@@ -2131,7 +2135,6 @@ if Cfg.UI.MenuBlur then
         blur:Destroy()
     end)
 end
--- rotating bg glow
 bgGlow = new("Frame", {Size = UDim2.fromScale(1.5, 1.5),
     Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
     BackgroundColor3 = Theme.accent, BorderSizePixel = 0, BackgroundTransparency = 0.95, ZIndex = 0}, menu)
@@ -2146,7 +2149,6 @@ task.spawn(function()
         end
     end
 end)
--- border pulse
 task.spawn(function()
     while menu.Parent do
         if menuStroke and menuStroke.Parent then
@@ -2436,7 +2438,9 @@ function closeMenu()
     else
         menu.Visible = false
     end
-end--==================== WIDGETS ====================
+end
+
+--==================== WIDGETS ====================
 pages = {}; tabs = {}; widgets = {}
 toggleLabels = {}
 pendingKeybind = nil
@@ -2620,12 +2624,13 @@ function toggleRow(pageId, path, label, onChange)
                 end
                 TS.humpWasActive = false
             else
-                -- reset HUMP state when turning on so it starts smooth
                 HUMP.phase = 0
                 HUMP.smoothVel = 0
                 HUMP.smoothAir = 0
                 HUMP.lockTimer = 1.5
                 HUMP.lastTier = "STILL"
+                HUMP.awaitingRespawn = false
+                HUMP.fallHold = 0
             end
         end
         if fire ~= false and onChange then pcall(onChange, state) end
@@ -3007,12 +3012,17 @@ function adRow(key, label, col)
     adRows[key] = val
     return val
 end
+adRow("Status", "Status:", Theme.success)
 adRow("Target", "Target:", Theme.accent2)
-adRow("Speed", "Speed:", Theme.accent2)
+adRow("UserSpeed", "Your Speed:", Theme.accent2)
+adRow("UserAmp", "Your Amp:", Theme.accent2)
+adRow("UserDist", "Your Dist:", Theme.accent2)
+adRow("AutoSpeed", "Auto Speed:", Theme.accent3)
 adRow("Tier", "Tier:", Theme.success)
 adRow("Air", "Airborne:", Theme.accent2)
+adRow("Fall", "Fall:", Theme.danger)
+adRow("Respawn", "Respawn:", Theme.gold)
 adRow("Mode", "Mode:", Theme.success)
-adRow("Vel", "Vel Match:", Theme.accent2)
 if Cfg.UI.ADMovable then makeDraggable(adFrame, adHeader) end
 if Cfg.UI.ADResizable then
     makeResizable(adFrame, {minW = 200, minH = 100, corners = {"br", "bl", "tr"},
@@ -3027,113 +3037,27 @@ refreshAD = function()
     adFrame.Visible = want and true or false
     if not want then return end
     local t = TS.target
+    if HUMP.awaitingRespawn then
+        adRows.Status.Text = "WAITING RESPAWN"
+        adRows.Status.TextColor3 = Theme.gold
+    elseif HUMP.fallHold > 0 then
+        adRows.Status.Text = "HOLDING AIR"
+        adRows.Status.TextColor3 = Theme.danger
+    else
+        adRows.Status.Text = "ACTIVE"
+        adRows.Status.TextColor3 = Theme.success
+    end
     adRows.Target.Text = t and t.Name or "—"
-    adRows.Speed.Text = string.format("%.1f", HUMP.smoothVel)
+    adRows.UserSpeed.Text = string.format("%.1f", Cfg.Troll.HumpSpeed)
+    adRows.UserAmp.Text = string.format("%.2f", Cfg.Troll.HumpAmp)
+    adRows.UserDist.Text = string.format("%.2f", Cfg.Troll.HumpDist)
+    adRows.AutoSpeed.Text = Cfg.Troll.HumpAutoDetect and string.format("%.1f", HUMP.effSpeed) or "off"
     adRows.Tier.Text = HR.tier
     adRows.Air.Text = HR.airborne and "yes" or "no"
+    adRows.Fall.Text = HR.fallingUnder and "yes" or "no"
+    adRows.Respawn.Text = HUMP.awaitingRespawn and "hold" or "—"
     adRows.Mode.Text = HR.autoMode
-    adRows.Vel.Text = Cfg.Troll.HumpVelMatch and "on" or "off"
 end
-
---==================== ADAPTIVE HUMP TUNER (smooth, no more jitter) ====================
-RS.Heartbeat:Connect(function(dt)
-    pcall(function()
-        if not Cfg.Troll.HumpAutoDetect then return end
-        local t = TS.target
-        if not t or not t.Character then return end
-        local tR = t.Character:FindFirstChild("HumanoidRootPart")
-        local tH = t.Character:FindFirstChildOfClass("Humanoid")
-        if not tR or not tH then return end
-
-        -- raw target speed
-        local vel = tR.AssemblyLinearVelocity
-        local s = vel.Magnitude
-        HR.speed = s
-
-        -- smooth target speed (exponential, frame-rate independent)
-        local sAlpha = 1 - math.exp(-8 * dt)
-        HR.smoothSpeed = HR.smoothSpeed + (s - HR.smoothSpeed) * sAlpha
-
-        -- airborne detection with a small buffer to prevent flicker
-        local airRaw = (tH.FloorMaterial == Enum.Material.Air or vel.Y > 6) and 1 or 0
-        local aAlpha = 1 - math.exp(-6 * dt)
-        HUMP.smoothAir = HUMP.smoothAir + (airRaw - HUMP.smoothAir) * aAlpha
-        HR.airborne = HUMP.smoothAir > 0.5
-
-        -- tier classification with hysteresis (prevents tier flip-flop)
-        local sm = HR.smoothSpeed
-        local function tierFor(v)
-            if v < 3 then return "STILL"
-            elseif v < 25 then return "WALK"
-            elseif v < 60 then return "RUN"
-            elseif v < 150 then return "FAST"
-            else return "EXTREME" end
-        end
-        local rawTier = tierFor(sm)
-        -- tier must persist a moment before switching
-        if rawTier ~= HR.tier then
-            HUMP.lockTimer = HUMP.lockTimer + dt
-            if HUMP.lockTimer > 0.35 then
-                HR.tier = rawTier
-                HUMP.lockTimer = 0
-            end
-        else
-            HUMP.lockTimer = 0
-        end
-
-        -- if target is basically still, freeze adaptation so hump stays consistent
-        if HR.tier == "STILL" and not HR.airborne then
-            HUMP.smoothVel = HUMP.smoothVel + (3 - HUMP.smoothVel) * (1 - math.exp(-4 * dt))
-            HR.autoMode = "Close"
-            return
-        end
-
-        -- target values based on smoothed tier/speed
-        local targetSpeed, targetAmp, targetDist
-        if HR.tier == "STILL" then
-            targetSpeed = 3.5
-            targetAmp   = 0.9
-            targetDist  = 1.5
-        elseif HR.tier == "WALK" then
-            targetSpeed = math.clamp(7 + sm * 0.25, 7, 14)
-            targetAmp   = math.clamp(1.1 + sm * 0.02, 1.1, 1.8)
-            targetDist  = math.clamp(1.6 + sm * 0.004, 1.6, 2.0)
-        elseif HR.tier == "RUN" then
-            targetSpeed = math.clamp(14 + (sm - 25) * 0.35, 14, 26)
-            targetAmp   = math.clamp(1.4 + (sm - 25) * 0.012, 1.4, 2.0)
-            targetDist  = math.clamp(1.8 + (sm - 25) * 0.004, 1.8, 2.4)
-        elseif HR.tier == "FAST" then
-            targetSpeed = math.clamp(24 + (sm - 60) * 0.22, 24, 42)
-            targetAmp   = math.clamp(1.7 + (sm - 60) * 0.008, 1.7, 2.4)
-            targetDist  = math.clamp(2.1 + (sm - 60) * 0.003, 2.1, 2.8)
-        else
-            targetSpeed = math.clamp(40 + (sm - 150) * 0.15, 40, 70)
-            targetAmp   = math.clamp(2.0 + (sm - 150) * 0.005, 2.0, 2.8)
-            targetDist  = math.clamp(2.5 + (sm - 150) * 0.002, 2.5, 3.2)
-        end
-
-        -- airborne boosts the speed a touch
-        if HR.airborne then
-            targetSpeed = targetSpeed * 1.25
-            targetAmp = targetAmp * 1.15
-        end
-
-        -- exponential smoothing toward targets so nothing snaps
-        local alpha = 1 - math.exp(-3.5 * dt)
-        HUMP.smoothVel = HUMP.smoothVel + (targetSpeed - HUMP.smoothVel) * alpha
-        Cfg.Troll.HumpSpeed = HUMP.smoothVel
-        Cfg.Troll.HumpAmp   = Cfg.Troll.HumpAmp + (targetAmp - Cfg.Troll.HumpAmp) * alpha
-        Cfg.Troll.HumpDist  = Cfg.Troll.HumpDist + (targetDist - Cfg.Troll.HumpDist) * alpha
-
-        -- readable mode label
-        if HR.tier == "STILL" then HR.autoMode = "Close"
-        elseif HR.tier == "EXTREME" then HR.autoMode = "Catch"
-        elseif HR.airborne then HR.autoMode = "Air"
-        else HR.autoMode = "Hybrid" end
-
-        pcall(refreshAD)
-    end)
-end)
 
 --==================== TABS ====================
 tabOrder = {"home", "combat", "visual", "move", "world", "players", "troll", "util", "save", "theme"}
@@ -3142,9 +3066,7 @@ tabTitles = {
     world = "WORLD", players = "PLAYERS", troll = "TROLL", util = "UTIL",
     save = "SAVE", theme = "THEME",
 }
-for _, id in ipairs(tabOrder) do makeTab(id, tabTitles[id]) end
-
---====================== HOME ======================
+for _, id in ipairs(tabOrder) do makeTab(id, tabTitles[id]) end--====================== HOME ======================
 do
     local pg2 = "home"
     section(pg2, "PROFILE", "👤")
@@ -3579,6 +3501,9 @@ do
                     HUMP.smoothVel = 0
                     HUMP.smoothAir = 0
                     HUMP.lockTimer = 1.0
+                    HUMP.awaitingRespawn = false
+                    HUMP.fallHold = 0
+                    HUMP.lastGoodCF = nil
                     rebuild()
                 end)
             end
@@ -3591,13 +3516,14 @@ do
     toggleRow(pg2, "Troll.FollowTarget", "Follow Target")
     sliderRow(pg2, "Troll.FollowSpeed", "Follow Speed", 10, 300, 0)
 
-    local hb = collapsible(pg2, "HUMP ENGINE", false)
+    local hb = collapsible(pg2, "HUMP ENGINE", true)
     toggleRow(hb, "Troll.Hump", "HUMP Target")
     toggleRow(hb, "Troll.HumpAutoDetect", "Auto-Detect Adaptive")
+    toggleRow(hb, "Troll.HumpFallProtect", "Fall / Respawn Protection")
     toggleRow(hb, "UI.AD", "Show Auto-Detect HUD (J)")
-    sliderRow(hb, "Troll.HumpSpeed", "Hump Speed", 1, 30, 0)
-    sliderRow(hb, "Troll.HumpAmp", "Hump Amplitude", 0.3, 4, 2)
-    sliderRow(hb, "Troll.HumpDist", "Stand Behind Distance", 0.8, 4, 2)
+    sliderRow(hb, "Troll.HumpSpeed", "Hump Speed (Hz)", 1, 100, 0)
+    sliderRow(hb, "Troll.HumpAmp", "Hump Amplitude", 0.3, 5, 2)
+    sliderRow(hb, "Troll.HumpDist", "Stand Behind Distance", 0.8, 5, 2)
     toggleRow(hb, "Troll.HumpYawOnly", "Yaw Only")
     toggleRow(hb, "Troll.HumpKeepOwner", "Re-claim Owner")
     toggleRow(hb, "Troll.HumpUsePlatform", "Use PlatformStand")
@@ -3890,6 +3816,8 @@ UIS.InputBegan:Connect(function(i, gpe)
             HUMP.smoothVel = 0
             HUMP.smoothAir = 0
             HUMP.lockTimer = 1.0
+            HUMP.awaitingRespawn = false
+            HUMP.fallHold = 0
             notify("Locked on", p.Name, Theme.success, 2.5)
         end
         return
@@ -4489,6 +4417,8 @@ function getTargetPlayer()
         local c = TS.target.Character
         local h = c and c:FindFirstChildOfClass("Humanoid")
         if h and h.Health > 0 then return TS.target end
+        -- target still exists but dead / character reset -> keep as target for respawn wait
+        if TS.target.Parent then return TS.target end
     end
     local best, bestD = nil, math.huge
     local mR = hrp()
@@ -4505,6 +4435,87 @@ function getTargetPlayer()
     end
     return best
 end
+
+-- Adaptive tuner: writes ONLY into HUMP.eff* — user sliders are never overwritten
+RS.Heartbeat:Connect(function(dt)
+    pcall(function()
+        if not Cfg.Troll.HumpAutoDetect then return end
+        local t = TS.target
+        if not t or not t.Character then return end
+        local tR = t.Character:FindFirstChild("HumanoidRootPart")
+        local tH = t.Character:FindFirstChildOfClass("Humanoid")
+        if not tR or not tH then return end
+
+        local vel = tR.AssemblyLinearVelocity
+        local s = vel.Magnitude
+        HR.speed = s
+        local sAlpha = 1 - math.exp(-8 * dt)
+        HR.smoothSpeed = HR.smoothSpeed + (s - HR.smoothSpeed) * sAlpha
+
+        local airRaw = (tH.FloorMaterial == Enum.Material.Air or vel.Y > 6) and 1 or 0
+        local aAlpha = 1 - math.exp(-6 * dt)
+        HUMP.smoothAir = HUMP.smoothAir + (airRaw - HUMP.smoothAir) * aAlpha
+        HR.airborne = HUMP.smoothAir > 0.5
+
+        local sm = HR.smoothSpeed
+        local function tierFor(v)
+            if v < 3 then return "STILL"
+            elseif v < 25 then return "WALK"
+            elseif v < 60 then return "RUN"
+            elseif v < 150 then return "FAST"
+            else return "EXTREME" end
+        end
+        local rawTier = tierFor(sm)
+        if rawTier ~= HR.tier then
+            HUMP.lockTimer = HUMP.lockTimer + dt
+            if HUMP.lockTimer > 0.35 then
+                HR.tier = rawTier
+                HUMP.lockTimer = 0
+            end
+        else
+            HUMP.lockTimer = 0
+        end
+
+        local targetSpeed, targetAmp, targetDist
+        if HR.tier == "STILL" then
+            targetSpeed, targetAmp, targetDist = 5, 1.0, 1.5
+        elseif HR.tier == "WALK" then
+            targetSpeed = math.clamp(10 + sm * 0.35, 10, 18)
+            targetAmp   = math.clamp(1.2 + sm * 0.02, 1.2, 1.9)
+            targetDist  = math.clamp(1.6 + sm * 0.005, 1.6, 2.0)
+        elseif HR.tier == "RUN" then
+            targetSpeed = math.clamp(18 + (sm - 25) * 0.5, 18, 35)
+            targetAmp   = math.clamp(1.5 + (sm - 25) * 0.012, 1.5, 2.2)
+            targetDist  = math.clamp(1.8 + (sm - 25) * 0.005, 1.8, 2.5)
+        elseif HR.tier == "FAST" then
+            targetSpeed = math.clamp(32 + (sm - 60) * 0.35, 32, 60)
+            targetAmp   = math.clamp(1.8 + (sm - 60) * 0.008, 1.8, 2.6)
+            targetDist  = math.clamp(2.2 + (sm - 60) * 0.003, 2.2, 3.0)
+        else
+            targetSpeed = math.clamp(55 + (sm - 150) * 0.2, 55, 100)
+            targetAmp   = math.clamp(2.2 + (sm - 150) * 0.005, 2.2, 3.0)
+            targetDist  = math.clamp(2.6 + (sm - 150) * 0.002, 2.6, 3.4)
+        end
+
+        if HR.airborne then
+            targetSpeed = targetSpeed * 1.3
+            targetAmp = targetAmp * 1.15
+        end
+
+        local alpha = 1 - math.exp(-3.5 * dt)
+        HUMP.effSpeed = HUMP.effSpeed + (targetSpeed - HUMP.effSpeed) * alpha
+        HUMP.effAmp   = HUMP.effAmp + (targetAmp - HUMP.effAmp) * alpha
+        HUMP.effDist  = HUMP.effDist + (targetDist - HUMP.effDist) * alpha
+
+        if HR.tier == "STILL" then HR.autoMode = "Close"
+        elseif HR.tier == "EXTREME" then HR.autoMode = "Catch"
+        elseif HR.airborne then HR.autoMode = "Air"
+        else HR.autoMode = "Hybrid" end
+
+        pcall(refreshAD)
+    end)
+end)
+
 RS.Heartbeat:Connect(function(dt)
     pcall(function()
         if Cfg.Troll.FollowTarget then
@@ -4523,65 +4534,154 @@ RS.Heartbeat:Connect(function(dt)
             end
         end
 
-        --===== FIXED HUMP ENGINE =====
+        --===== HUMP ENGINE (v3) =====
         if Cfg.Troll.Hump then
             local t = TS.target or getTargetPlayer()
-            if t and t.Character then
+            if t then
                 local mC = LP.Character
                 if mC then
                     local mR = mC:FindFirstChild("HumanoidRootPart")
                     local mH = mC:FindFirstChildOfClass("Humanoid")
-                    local tR = t.Character:FindFirstChild("HumanoidRootPart")
-                    local tH = t.Character:FindFirstChildOfClass("Humanoid")
-                    if mR and tR and mH and tH and tH.Health > 0 then
-                        if Cfg.Troll.HumpKeepOwner then
-                            pcall(function() mR:SetNetworkOwner(LP) end)
+                    if not (mR and mH) then return end
+
+                    -- === respawn protection ===
+                    if HUMP.awaitingRespawn then
+                        if t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
+                            local newH = t.Character:FindFirstChildOfClass("Humanoid")
+                            if newH and newH.Health > 0 then
+                                HUMP.awaitingRespawn = false
+                                HUMP.fallHold = 0
+                                HUMP.phase = 0
+                                HUMP.lastGoodCF = nil
+                                notify("Target respawned", t.Name, Theme.success, 2)
+                            end
                         end
-                        if Cfg.Troll.HumpUsePlatform then
-                            if not mH.PlatformStand then mH.PlatformStand = true end
-                        else
-                            if mH.PlatformStand then mH.PlatformStand = false end
-                        end
-
-                        -- KEY FIX: accumulate phase, never multiply tick() by speed
-                        HUMP.phase = HUMP.phase + dt * Cfg.Troll.HumpSpeed
-                        -- wrap to keep floating-point precision high over long sessions
-                        if HUMP.phase > math.pi * 2000 then HUMP.phase = HUMP.phase % (math.pi * 2) end
-
-                        local pos = tR.Position
-                        local look = tR.CFrame.LookVector
-                        local vel = tR.AssemblyLinearVelocity
-
-                        -- smooth thrust (sine of accumulated phase)
-                        local thrust = math.sin(HUMP.phase) * Cfg.Troll.HumpAmp
-
-                        local behindPos = pos - look * (Cfg.Troll.HumpDist - thrust)
-                        local want = Vector3.new(behindPos.X, pos.Y, behindPos.Z)
-
-                        local cf
-                        if Cfg.Troll.HumpYawOnly then
-                            local _, yaw = tR.CFrame:ToEulerAnglesYXZ()
-                            cf = CFrame.new(want) * CFrame.Angles(0, yaw, 0)
-                        else
-                            cf = CFrame.lookAt(want, want + look, Vector3.new(0, 1, 0))
-                        end
-
-                        -- position lerp to further smooth any leftover jitter
-                        -- (fast response but not snapping)
-                        local posAlpha = math.clamp(dt * 22, 0, 1)
-                        mR.CFrame = mR.CFrame:Lerp(cf, posAlpha)
+                        -- hold position; skip all hump logic
+                        mR.AssemblyLinearVelocity = Vector3.zero
                         mR.AssemblyAngularVelocity = Vector3.zero
-
-                        if Cfg.Troll.HumpVelMatch then
-                            mR.AssemblyLinearVelocity = vel
+                        if not Cfg.Troll.HumpUsePlatform then
+                            if mH.PlatformStand then mH.PlatformStand = false end
                         else
-                            mR.AssemblyLinearVelocity = Vector3.zero
+                            if not mH.PlatformStand then mH.PlatformStand = true end
                         end
-
-                        if Cfg.Movement.Noclip then noclipChar(mC) end
                         TS.humpWasActive = true
+                        return
                     end
+
+                    local tR = t.Character and t.Character:FindFirstChild("HumanoidRootPart")
+                    local tH = t.Character and t.Character:FindFirstChildOfClass("Humanoid")
+
+                    -- target lost character / died / respawning
+                    if not tR or not tH or tH.Health <= 0 then
+                        if Cfg.Troll.HumpFallProtect then
+                            HUMP.awaitingRespawn = true
+                            mR.AssemblyLinearVelocity = Vector3.zero
+                            mR.AssemblyAngularVelocity = Vector3.zero
+                        end
+                        TS.humpWasActive = true
+                        return
+                    end
+
+                    -- === falling under map detection ===
+                    local tY = tR.Position.Y
+                    local tVelY = tR.AssemblyLinearVelocity.Y
+                    local isFalling = (tY < -40) or (tVelY < -75)
+
+                    if isFalling and Cfg.Troll.HumpFallProtect then
+                        HR.fallingUnder = true
+                        HUMP.fallHold = 2.5
+                        -- freeze above target's last position instead of chasing down
+                        if HUMP.lastGoodCF then
+                            mR.CFrame = HUMP.lastGoodCF
+                            mR.AssemblyLinearVelocity = Vector3.zero
+                            mR.AssemblyAngularVelocity = Vector3.zero
+                        end
+                        TS.humpWasActive = true
+                        return
+                    end
+
+                    if HUMP.fallHold > 0 then
+                        HUMP.fallHold = HUMP.fallHold - dt
+                        mR.AssemblyLinearVelocity = Vector3.zero
+                        mR.AssemblyAngularVelocity = Vector3.zero
+                        TS.humpWasActive = true
+                        if HUMP.fallHold <= 0 then HR.fallingUnder = false end
+                        return
+                    end
+                    HR.fallingUnder = false
+
+                    -- save a "last good" position (above target, safe Y) while target is above -20
+                    if tY > -20 then
+                        HUMP.lastGoodCF = mR.CFrame
+                    end
+
+                    -- === core hump ===
+                    if Cfg.Troll.HumpKeepOwner then
+                        pcall(function() mR:SetNetworkOwner(LP) end)
+                    end
+                    if Cfg.Troll.HumpUsePlatform then
+                        if not mH.PlatformStand then mH.PlatformStand = true end
+                    else
+                        if mH.PlatformStand then mH.PlatformStand = false end
+                    end
+
+                    -- pick speed / amp / dist (auto vs user)
+                    local useSpeed, useAmp, useDist
+                    if Cfg.Troll.HumpAutoDetect then
+                        useSpeed, useAmp, useDist = HUMP.effSpeed, HUMP.effAmp, HUMP.effDist
+                    else
+                        useSpeed = Cfg.Troll.HumpSpeed
+                        useAmp   = Cfg.Troll.HumpAmp
+                        useDist  = Cfg.Troll.HumpDist
+                    end
+
+                    -- accumulate phase (no tick()*speed reset)
+                    HUMP.phase = HUMP.phase + dt * useSpeed
+                    if HUMP.phase > math.pi * 2000 then HUMP.phase = HUMP.phase % (math.pi * 2) end
+
+                    local pos = tR.Position
+                    local look = tR.CFrame.LookVector
+                    local vel = tR.AssemblyLinearVelocity
+
+                    local thrust = math.sin(HUMP.phase) * useAmp
+                    local behindPos = pos - look * (useDist - thrust)
+                    local want = Vector3.new(behindPos.X, pos.Y, behindPos.Z)
+
+                    local cf
+                    if Cfg.Troll.HumpYawOnly then
+                        local _, yaw = tR.CFrame:ToEulerAnglesYXZ()
+                        cf = CFrame.new(want) * CFrame.Angles(0, yaw, 0)
+                    else
+                        cf = CFrame.lookAt(want, want + look, Vector3.new(0, 1, 0))
+                    end
+
+                    -- frame-rate independent smoothing (fast response, no jitter)
+                    local posAlpha = 1 - math.exp(-25 * dt)
+                    mR.CFrame = mR.CFrame:Lerp(cf, posAlpha)
+                    mR.AssemblyAngularVelocity = Vector3.zero
+
+                    if Cfg.Troll.HumpVelMatch then
+                        mR.AssemblyLinearVelocity = vel
+                    else
+                        mR.AssemblyLinearVelocity = Vector3.zero
+                    end
+
+                    if Cfg.Movement.Noclip then noclipChar(mC) end
+                    TS.humpWasActive = true
                 end
+            else
+                -- no target at all
+                if TS.humpWasActive then
+                    local h = hum()
+                    if h then
+                        h.PlatformStand = false
+                        h.AutoRotate = true
+                        pcall(function() h:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+                    end
+                    TS.humpWasActive = false
+                end
+                HUMP.awaitingRespawn = false
+                HUMP.fallHold = 0
             end
         elseif TS.humpWasActive then
             local h = hum()
@@ -4594,7 +4694,12 @@ RS.Heartbeat:Connect(function(dt)
             HUMP.phase = 0
             HUMP.smoothVel = 0
             HUMP.smoothAir = 0
+            HUMP.awaitingRespawn = false
+            HUMP.fallHold = 0
+            HR.fallingUnder = false
         end
+
+        pcall(refreshAD)
     end)
 end)
 
