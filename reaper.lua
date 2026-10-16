@@ -1184,7 +1184,7 @@ if not verifySession() then
     warn("[REAPER] Key verification failed. Script locked.")
     return
 end
-end--==================== DRAG / RESIZE ====================
+--==================== DRAG / RESIZE ====================
 function makeDraggable(frame, handle)
     local dragging, sPos, fPos = false, nil, nil
     handle.InputBegan:Connect(function(i)
