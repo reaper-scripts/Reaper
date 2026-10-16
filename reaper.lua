@@ -208,16 +208,14 @@ function flagEmoji(code)
     if a < 0 or a > 25 or b < 0 or b > 25 then return "🌍" end
     local function enc(x)
         local cp = 0x1F1E6 + x
-        return string.char(
-            0xF0 | (cp >> 18),
-            0x80 | ((cp >> 12) & 0x3F),
-            0x80 | ((cp >> 6) & 0x3F),
-            0x80 | (cp & 0x3F)
-        )
+        local b1 = bit32.bor(0xF0, bit32.rshift(cp, 18))
+        local b2 = bit32.bor(0x80, bit32.band(bit32.rshift(cp, 12), 0x3F))
+        local b3 = bit32.bor(0x80, bit32.band(bit32.rshift(cp, 6), 0x3F))
+        local b4 = bit32.bor(0x80, bit32.band(cp, 0x3F))
+        return string.char(b1, b2, b3, b4)
     end
     return enc(a) .. enc(b)
 end
-
 function fetchCountry(cb)
     task.spawn(function()
         local req = (syn and syn.request) or (http and http.request) or http_request or request
