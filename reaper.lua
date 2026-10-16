@@ -207,12 +207,7 @@ function flagEmoji(code)
     local a, b = code:byte(1) - 65, code:byte(2) - 65
     if a < 0 or a > 25 or b < 0 or b > 25 then return "🌍" end
     local function enc(x)
-        local cp = 0x1F1E6 + x
-        local b1 = bit32.bor(0xF0, bit32.rshift(cp, 18))
-        local b2 = bit32.bor(0x80, bit32.band(bit32.rshift(cp, 12), 0x3F))
-        local b3 = bit32.bor(0x80, bit32.band(bit32.rshift(cp, 6), 0x3F))
-        local b4 = bit32.bor(0x80, bit32.band(cp, 0x3F))
-        return string.char(b1, b2, b3, b4)
+        return utf8.char(0x1F1E6 + x)
     end
     return enc(a) .. enc(b)
 end
