@@ -105,8 +105,6 @@ print("[REAPER] IO: " .. tostring(IO.has) .. " (" .. IO.reason .. ")")
 KEY_API = "https://proud-hill-8cf1.bigphatnigur.workers.dev"
 FEEDBACK_WEBHOOK = KEY_API .. "/feedback"
 DISCORD_INVITE = "https://discord.gg/AkNuT3Bxyn"
-
--- Worker now supports both /guild/check (GET/POST) and /check-guild-name.
 GUILD_CHECK_ENDPOINTS = {"/guild/check"}
 
 function httpGet(url)
@@ -474,7 +472,7 @@ function deepCopy(t)
     return o
 end
 
---==================== SAVE SYSTEM (JSON-based, robust) ====================
+--==================== SAVE SYSTEM ====================
 function saveFile() return "Reaper_" .. tostring(game.PlaceId) .. ".json" end
 function autoloadFile() return "Reaper_auto_" .. tostring(game.PlaceId) .. ".txt" end
 function globalAutoloadFile() return "Reaper_global_auto.txt" end
@@ -644,7 +642,9 @@ end
 SESSION_KEY = nil
 DISCORD_USERNAME = nil
 DISCORD_ID = nil
-VERIFY_STORE = "Reaper_verified_" .. tostring(game.PlaceId) .. ".json"
+-- [EDIT 1] Global verify store — key prompt fires ONCE across ALL places,
+-- not once per place.
+VERIFY_STORE = "Reaper_verified.json"
 
 local function loadVerifiedData()
     if not IO.has then return nil end
@@ -682,7 +682,9 @@ local function tryOpenBrowser(url)
 end
 local function downloadAvatar(url)
     if not IO.has or type(getcustomasset) ~= "function" then return nil end
-    local cacheFile = "Reaper_avatar_" .. tostring(LP.UserId) .. ".png"
+    -- [EDIT 2] Cache filename includes a hash of the URL so a changed
+    -- Discord PFP re-downloads instead of showing the stale one.
+    local cacheFile = "Reaper_avatar_" .. tostring(LP.UserId) .. "_" .. strHash(url) .. ".png"
     local ok, e = pcall(IO.isfile, cacheFile)
     if not ok or not e then
         local req = (syn and syn.request) or (http and http.request) or http_request or request
@@ -696,9 +698,6 @@ local function downloadAvatar(url)
     return nil
 end
 
--- Improved guild check with diagnostics.
--- Returns (true/false, infoTable) on success/failure-to-match,
--- or (nil, {err=string, debug=table}) when the check itself failed.
 function checkGuildIn(username)
     username = tostring(username or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if username == "" then return nil, {err = "no username entered", debug = {}} end
@@ -708,7 +707,6 @@ function checkGuildIn(username)
 
     local function interpret(d)
         if type(d) ~= "table" then return nil, "response not a table" end
-        -- Worker error shape: {inGuild: null, error: true, reason: "..."}
         if d.inGuild == nil and d.error then
             return nil, "worker: " .. tostring(d.reason or "unknown")
         end
@@ -735,7 +733,6 @@ function checkGuildIn(username)
     end
 
     for _, ep in ipairs(GUILD_CHECK_ENDPOINTS) do
-        -- GET
         local url = KEY_API .. ep .. "?username=" .. HttpService:UrlEncode(username) ..
                     "&robloxId=" .. tostring(LP.UserId)
         L("GET " .. ep)
@@ -753,7 +750,6 @@ function checkGuildIn(username)
             L("  ✗ " .. tostring(body))
         end
 
-        -- POST fallback
         L("POST " .. ep)
         local pb = HttpService:JSONEncode({username = username, robloxId = tostring(LP.UserId)})
         local ok2, res = httpPost(KEY_API .. ep, pb)
@@ -898,7 +894,8 @@ local function showVerifiedScreen(user)
         sg:Destroy()
     end)
 
-    task.delay(30, function()
+    -- [EDIT 5] Auto-dismiss after 60s (was 30s) so the welcome isn't too short
+    task.delay(60, function()
         if not done and sg.Parent then done = true; sg:Destroy() end
     end)
 
@@ -1244,10 +1241,16 @@ end
 
 --==================== VERIFY SESSION ====================
 local function verifySession()
+    -- [EDIT 3] tryCheck now also calls /check-token on startup
+    -- so a manual app deauth is caught the moment the script runs.
     local function tryCheck(k)
         if not k then return nil end
         local resp = postJSON("/check", {robloxId = tostring(LP.UserId), key = k})
         if resp and resp.valid then
+            local tokenResp = postJSON("/check-token", {robloxId = tostring(LP.UserId), key = k})
+            if tokenResp and tokenResp.authorized == false then
+                return nil, { reason = tokenResp.reason or "deauthorized" }
+            end
             return {
                 key = k,
                 username = resp.username or "user",
@@ -1311,9 +1314,9 @@ fetchCountry(function(name, code)
     MY_USER.countryCode = code or ""
 end)
 
-if not wasRestored then
-    showVerifiedScreen(verifiedUser)
-end
+-- [EDIT 4] Welcome screen shows on EVERY launch (not only after a fresh verify),
+-- so users see their Discord PFP + username + "LOAD SCRIPT" every session.
+showVerifiedScreen(verifiedUser)
 
 --==================== DRAG / RESIZE ====================
 function makeDraggable(frame, handle)
@@ -3713,43 +3716,58 @@ pcall(refreshAD)
 rebuildChips()
 
 --==================== PERIODIC VERIFICATION CHECK ====================
+-- [EDIT 6] Every 60s: light /check. Every 5th check (5min): full /check-token
+-- so a manual app deauth is caught within 5 minutes from inside the game.
 task.spawn(function()
     local rePrompting = false
+    local counter = 0
+    local function forceRePrompt(reason)
+        if rePrompting then return end
+        rePrompting = true
+        clearVerifiedData()
+        notify("Verification lost", reason or "Re-verify to continue.",
+            Theme.danger, 8)
+        task.spawn(function()
+            local user = showKeyPrompt()
+            if user then
+                MY_USER = user
+                MY_USER.country = "Unknown"; MY_USER.countryCode = ""
+                MY_USER.connectedAt = tick(); MY_USER.userId = LP.UserId
+                SESSION_KEY = user.key
+                DISCORD_USERNAME = user.discordName
+                DISCORD_ID = user.discordId
+                saveVerifiedData({
+                    key = user.key, robloxId = tostring(LP.UserId),
+                    discordUsername = user.discordName,
+                    discordId = user.discordId,
+                    savedAt = os.time(),
+                })
+                showVerifiedScreen(user)
+                if statusLbl then
+                    statusLbl.Text = "REAPER  ·  place " .. tostring(game.PlaceId) ..
+                        (DISCORD_USERNAME and ("  ·  @" .. DISCORD_USERNAME) or "")
+                end
+            end
+            rePrompting = false
+        end)
+    end
     while gui and gui.Parent do
         task.wait(60)
+        counter = counter + 1
         if not SESSION_KEY or rePrompting then continue end
-        local resp = postJSON("/check", {robloxId = tostring(LP.UserId), key = SESSION_KEY})
-        if resp then
-            if not resp.valid then
-                rePrompting = true
-                clearVerifiedData()
-                notify("Verification lost",
-                    "You left the Discord or revoked the app — re-verify to continue.",
-                    Theme.danger, 8)
-                task.spawn(function()
-                    local user = showKeyPrompt()
-                    if user then
-                        MY_USER = user
-                        MY_USER.country = "Unknown"; MY_USER.countryCode = ""
-                        MY_USER.connectedAt = tick(); MY_USER.userId = LP.UserId
-                        SESSION_KEY = user.key
-                        DISCORD_USERNAME = user.discordName
-                        DISCORD_ID = user.discordId
-                        saveVerifiedData({
-                            key = user.key, robloxId = tostring(LP.UserId),
-                            discordUsername = user.discordName,
-                            discordId = user.discordId,
-                            savedAt = os.time(),
-                        })
-                        showVerifiedScreen(user)
-                        if statusLbl then
-                            statusLbl.Text = "REAPER  ·  place " .. tostring(game.PlaceId) ..
-                                (DISCORD_USERNAME and ("  ·  @" .. DISCORD_USERNAME) or "")
-                        end
-                    end
-                    rePrompting = false
-                end)
+
+        if counter % 5 == 0 then
+            local tokenResp = postJSON("/check-token",
+                {robloxId = tostring(LP.UserId), key = SESSION_KEY})
+            if tokenResp and tokenResp.authorized == false then
+                forceRePrompt("You removed the app — re-verify to continue.")
+                continue
             end
+        end
+
+        local resp = postJSON("/check", {robloxId = tostring(LP.UserId), key = SESSION_KEY})
+        if resp and not resp.valid then
+            forceRePrompt("You left the Discord — re-verify to continue.")
         end
     end
 end)
@@ -4797,4 +4815,4 @@ LP.OnTeleport:Connect(function()
     if autoloadName then pcall(saveLoadout, autoloadName, true) end
 end)
 
-print("[REAPER] loaded · place " .. tostring(game.PlaceId))
+print("[REAPER] loaded · place " .. tostring(game.PlaceId))=-
