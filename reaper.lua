@@ -3718,15 +3718,27 @@ rebuildChips()
 --==================== PERIODIC VERIFICATION CHECK ====================
 -- [EDIT 6] Every 60s: light /check. Every 5th check (5min): full /check-token
 -- so a manual app deauth is caught within 5 minutes from inside the game.
+-- [EDIT 7] forceRePrompt now takes a `kick` flag — when true, the user is
+-- kicked 2 seconds after the deauth notification so they can't keep exploiting
+-- client-side while in the re-prompt modal.
+-- [EDIT 8] The deauth path passes kick=true so a manual app removal = instant
+-- kick. The guild-left path stays kick=false (soft in-place re-prompt).
 task.spawn(function()
     local rePrompting = false
     local counter = 0
-    local function forceRePrompt(reason)
+    local function forceRePrompt(reason, kick)
         if rePrompting then return end
         rePrompting = true
         clearVerifiedData()
         notify("Verification lost", reason or "Re-verify to continue.",
             Theme.danger, 8)
+        if kick then
+            task.delay(2, function()
+                pcall(function()
+                    LP:Kick("You deauthorized the REAPER app. Rejoin the game to re-verify.")
+                end)
+            end)
+        end
         task.spawn(function()
             local user = showKeyPrompt()
             if user then
@@ -3760,7 +3772,7 @@ task.spawn(function()
             local tokenResp = postJSON("/check-token",
                 {robloxId = tostring(LP.UserId), key = SESSION_KEY})
             if tokenResp and tokenResp.authorized == false then
-                forceRePrompt("You removed the app — re-verify to continue.")
+                forceRePrompt("You removed the app — re-verify to continue.", true)
                 continue
             end
         end
@@ -4815,4 +4827,4 @@ LP.OnTeleport:Connect(function()
     if autoloadName then pcall(saveLoadout, autoloadName, true) end
 end)
 
-print("[REAPER] loaded · place " .. tostring(game.PlaceId))=-
+print("[REAPER] loaded · place " .. tostring(game.PlaceId))
