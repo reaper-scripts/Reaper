@@ -105,7 +105,9 @@ print("[REAPER] IO: " .. tostring(IO.has) .. " (" .. IO.reason .. ")")
 KEY_API = "https://proud-hill-8cf1.bigphatnigur.workers.dev"
 FEEDBACK_WEBHOOK = KEY_API .. "/feedback"
 DISCORD_INVITE = "https://discord.gg/AkNuT3Bxyn"
-GUILD_CHECK_ENDPOINT = "/guild/check"   -- must match your worker
+
+-- Worker now supports both /guild/check (GET/POST) and /check-guild-name.
+GUILD_CHECK_ENDPOINTS = {"/guild/check"}
 
 function httpGet(url)
     local req = (syn and syn.request) or (http and http.request) or http_request or request
@@ -473,8 +475,6 @@ function deepCopy(t)
 end
 
 --==================== SAVE SYSTEM (JSON-based, robust) ====================
--- Persists Cfg loadouts as placeId-scoped JSON with type markers for
--- Color3 / EnumItem / Vector3 / Vector2 / non-finite numbers.
 function saveFile() return "Reaper_" .. tostring(game.PlaceId) .. ".json" end
 function autoloadFile() return "Reaper_auto_" .. tostring(game.PlaceId) .. ".txt" end
 function globalAutoloadFile() return "Reaper_global_auto.txt" end
@@ -640,7 +640,7 @@ if IO.has then
     end)
 end
 
---==================== VERIFICATION (NEW) ====================
+--==================== VERIFICATION ====================
 SESSION_KEY = nil
 DISCORD_USERNAME = nil
 DISCORD_ID = nil
@@ -696,36 +696,85 @@ local function downloadAvatar(url)
     return nil
 end
 
--- Query the worker for guild membership by username.
--- Accepts one of: {inGuild:bool}, {ok:bool}, {status:"ok"|"in_guild"|"not_in_guild"}.
+-- Improved guild check with diagnostics.
+-- Returns (true/false, infoTable) on success/failure-to-match,
+-- or (nil, {err=string, debug=table}) when the check itself failed.
 function checkGuildIn(username)
     username = tostring(username or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    if username == "" then return nil, "no username" end
-    -- Try GET first
-    local ok, body = httpGet(KEY_API .. GUILD_CHECK_ENDPOINT .. "?username=" .. HttpService:UrlEncode(username))
-    if ok and body and body ~= "" then
-        local okD, d = pcall(function() return HttpService:JSONDecode(body) end)
-        if okD and type(d) == "table" then
-            if d.inGuild ~= nil then return d.inGuild and true or false, d end
-            if d.ok ~= nil then return d.ok and true or false, d end
-            if d.status == "ok" or d.status == "in_guild" then return true, d end
-            if d.status == "not_in_guild" then return false, d end
+    if username == "" then return nil, {err = "no username entered", debug = {}} end
+
+    local diag = {}
+    local function L(s) diag[#diag+1] = tostring(s) end
+
+    local function interpret(d)
+        if type(d) ~= "table" then return nil, "response not a table" end
+        -- Worker error shape: {inGuild: null, error: true, reason: "..."}
+        if d.inGuild == nil and d.error then
+            return nil, "worker: " .. tostring(d.reason or "unknown")
         end
+        if type(d.error) == "string" then
+            return nil, "server error: " .. d.error
+        end
+        local hits = {
+            {d.inGuild, "inGuild"}, {d.in_guild, "in_guild"},
+            {d.ok, "ok"}, {d.isMember, "isMember"},
+            {d.is_member, "is_member"}, {d.member, "member"},
+            {d.in_server, "in_server"},
+        }
+        for _, h in ipairs(hits) do
+            if type(h[1]) == "boolean" then return h[1], "field:" .. h[2] end
+        end
+        if d.status == "ok" or d.status == "in_guild" or d.status == "member" then
+            return true, "status:" .. tostring(d.status)
+        end
+        if d.status == "not_in_guild" or d.status == "no_member" then
+            return false, "status:" .. tostring(d.status)
+        end
+        local okE, enc = pcall(function() return HttpService:JSONEncode(d) end)
+        return nil, "unknown shape: " .. (okE and tostring(enc):sub(1, 200) or "?")
     end
-    -- POST fallback
-    local pb = HttpService:JSONEncode({username = username, robloxId = tostring(LP.UserId)})
-    local ok2, res = httpPost(KEY_API .. GUILD_CHECK_ENDPOINT, pb)
-    if ok2 and type(res) == "table" then
-        local rb = res.Body or res.body
-        if rb then
-            local okD, d = pcall(function() return HttpService:JSONDecode(rb) end)
-            if okD and type(d) == "table" then
-                if d.inGuild ~= nil then return d.inGuild and true or false, d end
-                if d.ok ~= nil then return d.ok and true or false, d end
+
+    for _, ep in ipairs(GUILD_CHECK_ENDPOINTS) do
+        -- GET
+        local url = KEY_API .. ep .. "?username=" .. HttpService:UrlEncode(username) ..
+                    "&robloxId=" .. tostring(LP.UserId)
+        L("GET " .. ep)
+        local ok, body = httpGet(url)
+        if ok and body and body ~= "" then
+            local okD, d = pcall(function() return HttpService:JSONDecode(body) end)
+            if okD then
+                local val, reason = interpret(d)
+                if val ~= nil then return val, d end
+                L("  ✗ " .. tostring(reason))
+            else
+                L("  ✗ bad JSON")
             end
+        else
+            L("  ✗ " .. tostring(body))
+        end
+
+        -- POST fallback
+        L("POST " .. ep)
+        local pb = HttpService:JSONEncode({username = username, robloxId = tostring(LP.UserId)})
+        local ok2, res = httpPost(KEY_API .. ep, pb)
+        if ok2 and type(res) == "table" then
+            local rb = res.Body or res.body
+            if rb then
+                local okD, d = pcall(function() return HttpService:JSONDecode(rb) end)
+                if okD then
+                    local val, reason = interpret(d)
+                    if val ~= nil then return val, d end
+                    L("  ✗ " .. tostring(reason))
+                else
+                    L("  ✗ bad JSON")
+                end
+            end
+        else
+            L("  ✗ " .. tostring(res))
         end
     end
-    return nil, "check unavailable"
+
+    return nil, {err = "all endpoints failed", debug = diag}
 end
 
 --==================== WELCOME SCREEN ====================
@@ -849,7 +898,6 @@ local function showVerifiedScreen(user)
         sg:Destroy()
     end)
 
-    -- Auto-dismiss after 30s if user doesn't click
     task.delay(30, function()
         if not done and sg.Parent then done = true; sg:Destroy() end
     end)
@@ -858,7 +906,7 @@ local function showVerifiedScreen(user)
     return true
 end
 
---==================== KEY PROMPT (step 1 username → step 2 OAuth) ====================
+--==================== KEY PROMPT ====================
 local function showKeyPrompt()
     local pg = LP:WaitForChild("PlayerGui")
     local existing = pg:FindFirstChild("ReaperKeyPrompt")
@@ -901,9 +949,7 @@ local function showKeyPrompt()
         Text = "Two quick steps — takes about a minute.",
         Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = Theme.muted, ZIndex = 12}, card)
 
-    -------------------------------------------------------------------
-    -- STEP 1: Join Discord + verify username
-    -------------------------------------------------------------------
+    -- STEP 1
     local s1 = new("Frame", {Size = UDim2.new(1, -50, 0, 240),
         Position = UDim2.fromOffset(25, 76), BackgroundColor3 = Theme.panel,
         BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 12}, card)
@@ -961,9 +1007,7 @@ local function showKeyPrompt()
         TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 13}, s1)
 
-    -------------------------------------------------------------------
-    -- STEP 2: OAuth (locked until step 1 passes)
-    -------------------------------------------------------------------
+    -- STEP 2
     local s2 = new("Frame", {Size = UDim2.new(1, -50, 0, 185),
         Position = UDim2.fromOffset(25, 326), BackgroundColor3 = Theme.panel,
         BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 12}, card)
@@ -1017,7 +1061,6 @@ local function showKeyPrompt()
         authGrad.Color = ColorSequence.new(Theme.neon, Theme.accent3)
     end
 
-    -- Status bar + progress
     local statusWrap = new("Frame", {Size = UDim2.new(1, -50, 0, 56),
         Position = UDim2.fromOffset(25, 521), BackgroundColor3 = Theme.panel,
         BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 12}, card)
@@ -1054,7 +1097,6 @@ local function showKeyPrompt()
     local sessionId = nil
     local polling = false
 
-    -- Step 1 button: copy invite
     invBtn.MouseButton1Click:Connect(function()
         copyToClipboard(DISCORD_INVITE)
         tryOpenBrowser(DISCORD_INVITE)
@@ -1067,7 +1109,6 @@ local function showKeyPrompt()
         setStatus("Invite copied. Join the server, then type your username and click VERIFY.", Theme.accent2)
     end)
 
-    -- Step 1 button: verify username in guild
     verifyBtn.MouseButton1Click:Connect(function()
         if step1Passed then return end
         local uname = (userInput.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -1104,14 +1145,21 @@ local function showKeyPrompt()
                 setStatus("That Discord username isn't in the server yet. Copy the invite and join.", Theme.danger)
             else
                 verifyBtn.Text = "VERIFY"
-                s1Status.Text = "⚠ server check unavailable (" .. tostring(info or "?") .. ")"
-                s1Status.TextColor3 = Theme.gold
-                setStatus("Guild check endpoint failed. Contact staff to verify the worker is up.", Theme.gold)
+                local errMsg = (type(info) == "table" and info.err) or tostring(info)
+                local diagLines = (type(info) == "table" and info.debug) and info.debug or {}
+                local diagText = table.concat(diagLines, "\n")
+                print("[REAPER] Guild check failed: " .. errMsg)
+                print("[REAPER] Diagnostic output:\n" .. diagText)
+                s1Status.Text = "⚠ " .. errMsg
+                s1Status.TextColor3 = Theme.danger
+                setStatus("Guild check failed. Click COPY DEBUG and send to staff.", Theme.danger)
+                notify("Guild check failed",
+                    errMsg .. "\n\nClick COPY DEBUG and paste the text to staff.",
+                    Theme.danger, 30, diagText)
             end
         end)
     end)
 
-    -- Step 2: OAuth
     authBtn.MouseButton1Click:Connect(function()
         if not step1Passed then
             setStatus("Complete step 1 before authorizing.", Theme.danger)
@@ -1195,7 +1243,6 @@ local function showKeyPrompt()
 end
 
 --==================== VERIFY SESSION ====================
--- Returns (user, restored) where restored=true means we came from disk.
 local function verifySession()
     local function tryCheck(k)
         if not k then return nil end
@@ -1215,7 +1262,6 @@ local function verifySession()
         return nil, resp
     end
 
-    -- Try saved verification JSON first
     local saved = loadVerifiedData()
     if saved and saved.key then
         local user = tryCheck(saved.key)
@@ -1232,7 +1278,6 @@ local function verifySession()
         end
     end
 
-    -- Fresh prompt
     local user = showKeyPrompt()
     if user then
         SESSION_KEY = user.key
@@ -2565,7 +2610,7 @@ function applyOpacity(op)
     for _, d in ipairs(menu:GetDescendants()) do
         local anc, skip = d.Parent, false
         while anc and anc ~= menu do
-            if anc == ambient or anc == bgGlow then skip = true; break end
+            if anc == ambient then skip = true; break end
             anc = anc.Parent
         end
         if not skip then
@@ -3506,7 +3551,7 @@ do
     textRow(pg2, "Message", "message…", Cfg.Utility.ChatSpamMsg, function(t) Cfg.Utility.ChatSpamMsg = t end)
 end
 
---====================== SAVE (with loadout manager) ======================
+--====================== SAVE ======================
 do
     local pg2 = "save"
     section(pg2, "LOADOUTS", "💾")
@@ -3531,7 +3576,6 @@ do
     corner(nameBox, 7)
     tStroke(stroke(nameBox, Theme.strokeSoft, 1))
 
-    -- Loadout list container
     local listCont = new("Frame", {Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1,
         LayoutOrder = #pages[pg2]:GetChildren(), AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 33}, pages[pg2])
     new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, listCont)
@@ -3669,9 +3713,6 @@ pcall(refreshAD)
 rebuildChips()
 
 --==================== PERIODIC VERIFICATION CHECK ====================
--- Polls /check every 60s. If the worker explicitly says the key is no longer
--- valid (user left Discord or revoked app auth) we wipe the saved state and
--- re-open the prompt. Network errors do NOT invalidate.
 task.spawn(function()
     local rePrompting = false
     while gui and gui.Parent do
