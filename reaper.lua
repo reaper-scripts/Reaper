@@ -304,15 +304,21 @@ ESPColours = {
 }
 
 --==================== STATE ====================
-TS = {target = nil, hovered = nil, humpWasActive = false, lastSpam = 0}
+-- [PATCH 2] added lockedTarget, lockStartTime for aimbot target lock
+TS = {target = nil, hovered = nil, humpWasActive = false, lastSpam = 0,
+      lockedTarget = nil, lockStartTime = 0}
 HR = {speed = 0, smoothSpeed = 0, tier = "STILL", airborne = false, airTimer = 0,
       teleporting = false, autoMode = "Hybrid", fallingUnder = false,
       lastGood = nil, respawnPending = false}
+-- [PATCH 2] added lastGoodY, anchorY, oldRootPart, initialAnchor for better fall/respawn detection
 HUMP = {
     phase = 0, smoothVel = 0, smoothAir = 0, lastTier = "STILL", lockTimer = 0,
     speedMult = 1.0, ampMult = 1.0, distMult = 1.0,
     fallHold = 0, lastGoodCF = nil, awaitingRespawn = false,
+    lastGoodY = nil, anchorY = nil, oldRootPart = nil, initialAnchor = nil,
 }
+-- [PATCH 2] orbit state table
+ORBIT = {angle = 0, shootCD = 0, wasActive = false}
 RA = {keys = {teleport = nil, spectate = nil, hump = nil}, spectateTarget = nil, spectateZoom = 1}
 PREFERRED_KEYS = {
     Enum.KeyCode.One, Enum.KeyCode.Two, Enum.KeyCode.Three,
@@ -366,10 +372,19 @@ function sendChat(text)
 end
 
 --==================== CONFIG ====================
+-- [PATCH 1] Aimbot extensions: LockTarget, PredictAim, MagicBullet, PCPTeamOnly
+-- [PATCH 1] New Orbit table
+-- [PATCH 1] New TapBinds table
 Cfg = {
     Aimbot = {Enabled = false, Key = Enum.UserInputType.MouseButton2, ToggleMode = false,
         FOV = 180, Smoothness = 8, Strength = 6, TargetPart = "Head",
-        TeamCheck = false, VisibleOnly = false, ShowCircle = true, Humanize = true, MaxDist = 1000},
+        TeamCheck = false, VisibleOnly = false, ShowCircle = true, Humanize = true, MaxDist = 1000,
+        LockTarget = true, PredictAim = true, PredictAmount = 0.06,
+        MagicBullet = false, MagicBulletWalls = true,
+        PCPTeamOnly = true},
+    Orbit = {Enabled = false, Radius = 8, Speed = 12, Height = 2,
+        AutoShoot = true, AutoAim = true},
+    TapBinds = {teleport = nil, hump = nil, orbit = nil, spectate = nil},
     Trigger = {Enabled = false, Key = Enum.UserInputType.MouseButton1,
         Radius = 20, Delay = 0.05, TeamCheck = true},
     Visuals = {Enabled = false, NameTags = true, Distance = true, ShowRole = true,
@@ -636,14 +651,11 @@ if IO.has then
             if ok4 and c2 and c2 ~= "" then autoloadName = c2:gsub("%s+$", "") end
         end
     end)
-end
-
---==================== VERIFICATION ====================
+end--==================== VERIFICATION ====================
 SESSION_KEY = nil
 DISCORD_USERNAME = nil
 DISCORD_ID = nil
--- [EDIT 1] Global verify store — key prompt fires ONCE across ALL places,
--- not once per place.
+-- [EDIT 1] Global verify store — key prompt fires ONCE across ALL places
 VERIFY_STORE = "Reaper_verified.json"
 
 local function loadVerifiedData()
@@ -682,8 +694,7 @@ local function tryOpenBrowser(url)
 end
 local function downloadAvatar(url)
     if not IO.has or type(getcustomasset) ~= "function" then return nil end
-    -- [EDIT 2] Cache filename includes a hash of the URL so a changed
-    -- Discord PFP re-downloads instead of showing the stale one.
+    -- [EDIT 2] Cache filename includes URL hash so changed PFP re-downloads
     local cacheFile = "Reaper_avatar_" .. tostring(LP.UserId) .. "_" .. strHash(url) .. ".png"
     local ok, e = pcall(IO.isfile, cacheFile)
     if not ok or not e then
@@ -701,18 +712,14 @@ end
 function checkGuildIn(username)
     username = tostring(username or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if username == "" then return nil, {err = "no username entered", debug = {}} end
-
     local diag = {}
     local function L(s) diag[#diag+1] = tostring(s) end
-
     local function interpret(d)
         if type(d) ~= "table" then return nil, "response not a table" end
         if d.inGuild == nil and d.error then
             return nil, "worker: " .. tostring(d.reason or "unknown")
         end
-        if type(d.error) == "string" then
-            return nil, "server error: " .. d.error
-        end
+        if type(d.error) == "string" then return nil, "server error: " .. d.error end
         local hits = {
             {d.inGuild, "inGuild"}, {d.in_guild, "in_guild"},
             {d.ok, "ok"}, {d.isMember, "isMember"},
@@ -731,7 +738,6 @@ function checkGuildIn(username)
         local okE, enc = pcall(function() return HttpService:JSONEncode(d) end)
         return nil, "unknown shape: " .. (okE and tostring(enc):sub(1, 200) or "?")
     end
-
     for _, ep in ipairs(GUILD_CHECK_ENDPOINTS) do
         local url = KEY_API .. ep .. "?username=" .. HttpService:UrlEncode(username) ..
                     "&robloxId=" .. tostring(LP.UserId)
@@ -749,7 +755,6 @@ function checkGuildIn(username)
         else
             L("  ✗ " .. tostring(body))
         end
-
         L("POST " .. ep)
         local pb = HttpService:JSONEncode({username = username, robloxId = tostring(LP.UserId)})
         local ok2, res = httpPost(KEY_API .. ep, pb)
@@ -769,7 +774,6 @@ function checkGuildIn(username)
             L("  ✗ " .. tostring(res))
         end
     end
-
     return nil, {err = "all endpoints failed", debug = diag}
 end
 
@@ -778,14 +782,11 @@ local function showVerifiedScreen(user)
     local pg = LP:WaitForChild("PlayerGui")
     local existing = pg:FindFirstChild("ReaperVerified")
     if existing then existing:Destroy() end
-
     local sg = new("ScreenGui", {Name = "ReaperVerified", ResetOnSpawn = false,
         IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 20000}, pg)
-
     local backdrop = new("Frame", {Size = UDim2.fromScale(1, 1),
         BackgroundColor3 = Color3.fromRGB(1, 1, 4), BackgroundTransparency = 0.15,
         BorderSizePixel = 0, ZIndex = 1}, sg)
-
     local cardW, cardH = 430, 400
     local card = new("Frame", {Size = UDim2.fromOffset(cardW, cardH),
         Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 + 40),
@@ -793,23 +794,19 @@ local function showVerifiedScreen(user)
     corner(card, 22)
     grad(card, Color3.fromRGB(14, 8, 28), Color3.fromRGB(2, 1, 6), 90)
     dropShadow(card, 22, 18, 0.65)
-
     local borderGlow = new("Frame", {Size = UDim2.new(1, 16, 1, 16),
         Position = UDim2.new(0.5, 0, 0.5, 0), AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Theme.neon, BackgroundTransparency = 0.5,
         BorderSizePixel = 0, ZIndex = 9}, card)
     corner(borderGlow, 26)
-
     local avatarSize = 92
     local avatarWrap = new("Frame", {Size = UDim2.fromOffset(avatarSize, avatarSize),
         Position = UDim2.new(0.5, 0, 0, 32), AnchorPoint = Vector2.new(0.5, 0),
         BackgroundTransparency = 1, ZIndex = 13}, card)
-
     local avatarHolder = new("Frame", {Size = UDim2.fromScale(1, 1),
         BackgroundColor3 = Theme.panel2, BorderSizePixel = 0,
         ZIndex = 14, ClipsDescendants = true}, avatarWrap)
     corner(avatarHolder, avatarSize / 2)
-
     local loaded = false
     if user.avatar and user.avatar ~= "" then
         local assetId = downloadAvatar(user.avatar)
@@ -831,12 +828,10 @@ local function showVerifiedScreen(user)
             Font = Enum.Font.GothamBlack, TextSize = 42,
             TextColor3 = Color3.new(1, 1, 1), ZIndex = 16}, fb)
     end
-
     local avatarBorder = new("Frame", {Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1, ZIndex = 16}, avatarHolder)
     corner(avatarBorder, avatarSize / 2)
     stroke(avatarBorder, Theme.neon, 2.6, 0.1)
-
     local nameY = 32 + avatarSize + 14
     new("TextLabel", {Size = UDim2.new(1, -40, 0, 26),
         Position = UDim2.fromOffset(20, nameY), BackgroundTransparency = 1,
@@ -849,7 +844,6 @@ local function showVerifiedScreen(user)
                (user.discordName and ("  ·  discord @" .. user.discordName) or ""),
         Font = Enum.Font.Gotham, TextSize = 12,
         TextColor3 = Theme.muted, ZIndex = 12}, card)
-
     local pillW = 160
     local pill = new("Frame", {Size = UDim2.fromOffset(pillW, 22),
         Position = UDim2.new(0.5, -pillW/2, 0, nameY + 48),
@@ -866,7 +860,6 @@ local function showVerifiedScreen(user)
         pillLbl.Text = b.emoji .. " " .. b.label
         pillLbl.TextColor3 = b.color
     end
-
     local btnY = nameY + 82
     local loadBtn = new("TextButton", {Size = UDim2.new(1, -60, 0, 48),
         Position = UDim2.fromOffset(30, btnY), BackgroundColor3 = Theme.neon,
@@ -875,12 +868,10 @@ local function showVerifiedScreen(user)
         BorderSizePixel = 0, ZIndex = 13}, card)
     corner(loadBtn, 12)
     grad(loadBtn, Theme.neon, Theme.accent3, 0)
-
     card.Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 + 90)
     card.BackgroundTransparency = 1
     Tween:Create(card, TweenInfo.new(0.6, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
         {Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2), BackgroundTransparency = 0}):Play()
-
     local done = false
     loadBtn.MouseButton1Click:Connect(function()
         if done then return end
@@ -893,12 +884,10 @@ local function showVerifiedScreen(user)
         task.wait(0.4)
         sg:Destroy()
     end)
-
-    -- [EDIT 5] Auto-dismiss after 60s (was 30s) so the welcome isn't too short
+    -- [EDIT 5] auto-dismiss after 60s
     task.delay(60, function()
         if not done and sg.Parent then done = true; sg:Destroy() end
     end)
-
     while not done do task.wait(0.2) end
     return true
 end
@@ -908,21 +897,17 @@ local function showKeyPrompt()
     local pg = LP:WaitForChild("PlayerGui")
     local existing = pg:FindFirstChild("ReaperKeyPrompt")
     if existing then existing:Destroy() end
-
     local promptGui = new("ScreenGui", {Name = "ReaperKeyPrompt", ResetOnSpawn = false,
         IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 20000}, pg)
-
     pcall(function()
         local b = new("BlurEffect", {Size = 20, Parent = Lighting})
         b.Name = "ReaperPromptBlur"
         task.spawn(function() while promptGui.Parent do task.wait(0.2) end; b:Destroy() end)
     end)
-
     local backdrop = new("Frame", {Size = UDim2.fromScale(1, 1),
         BackgroundColor3 = Color3.fromRGB(1, 1, 4), BackgroundTransparency = 1,
         BorderSizePixel = 0, ZIndex = 1}, promptGui)
     Tween:Create(backdrop, TweenInfo.new(0.4), {BackgroundTransparency = 0.3}):Play()
-
     local cardW, cardH = 540, 660
     local card = new("Frame", {Size = UDim2.fromOffset(cardW, cardH),
         Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 + 20),
@@ -930,13 +915,11 @@ local function showKeyPrompt()
     corner(card, 22)
     grad(card, Color3.fromRGB(14, 8, 28), Color3.fromRGB(2, 1, 6), 90)
     dropShadow(card, 22, 22, 0.7)
-
     local borderGlow = new("Frame", {Size = UDim2.new(1, 16, 1, 16),
         Position = UDim2.new(0.5, 0, 0.5, 0), AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundColor3 = Theme.neon, BackgroundTransparency = 0.5,
         BorderSizePixel = 0, ZIndex = 9}, card)
     corner(borderGlow, 26)
-
     new("TextLabel", {Size = UDim2.new(1, 0, 0, 26),
         Position = UDim2.fromOffset(0, 20), BackgroundTransparency = 1,
         Text = "VERIFICATION", Font = Enum.Font.GothamBlack,
@@ -953,7 +936,6 @@ local function showKeyPrompt()
     corner(s1, 12)
     local s1Stroke = stroke(s1, Theme.strokeSoft, 1.4, 0.4)
     grad(s1, Color3.fromRGB(28, 16, 52), Theme.panel, 90)
-
     local s1Tag = new("Frame", {Size = UDim2.fromOffset(30, 30),
         Position = UDim2.fromOffset(14, 14), BackgroundColor3 = Theme.neon,
         BorderSizePixel = 0, ZIndex = 13}, s1)
@@ -961,20 +943,17 @@ local function showKeyPrompt()
     local s1TagLbl = new("TextLabel", {Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1, Text = "1", Font = Enum.Font.GothamBlack,
         TextSize = 14, TextColor3 = Color3.new(1,1,1), ZIndex = 14}, s1Tag)
-
     new("TextLabel", {Size = UDim2.new(1, -58, 0, 20),
         Position = UDim2.fromOffset(52, 16), BackgroundTransparency = 1,
         Text = "JOIN DISCORD + VERIFY USERNAME", Font = Enum.Font.GothamBlack,
         TextSize = 13, TextColor3 = Theme.text,
         TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 13}, s1)
-
     new("TextLabel", {Size = UDim2.new(1, -30, 0, 46),
         Position = UDim2.fromOffset(16, 48), BackgroundTransparency = 1,
         Text = "HOW TO:\n  1.  Copy the invite below and join the server\n  2.  Type your Discord username below\n  3.  Click VERIFY — we check the guild membership automatically",
         Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.accent2,
         TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 13}, s1)
-
     local invBtn = new("TextButton", {Size = UDim2.new(1, -32, 0, 30),
         Position = UDim2.fromOffset(16, 98), BackgroundColor3 = Theme.neon,
         Text = "🔗  COPY INVITE LINK", Font = Enum.Font.GothamBold, TextSize = 11,
@@ -982,22 +961,19 @@ local function showKeyPrompt()
         BorderSizePixel = 0, ZIndex = 13}, s1)
     corner(invBtn, 8)
     grad(invBtn, Theme.neon, Theme.accent3, 0)
-
     local userInput = new("TextBox", {Size = UDim2.new(1, -130, 0, 30),
         Position = UDim2.fromOffset(16, 136), BackgroundColor3 = Theme.panel2,
         BorderSizePixel = 0, Text = "", PlaceholderText = "discord username…",
         PlaceholderColor3 = Theme.muted, Font = Enum.Font.Gotham, TextSize = 11,
         TextColor3 = Theme.text, ClearTextOnFocus = false, ZIndex = 50}, s1)
     corner(userInput, 8)
-    local uiStroke = stroke(userInput, Theme.strokeSoft, 1.2)
-
+    stroke(userInput, Theme.strokeSoft, 1.2)
     local verifyBtn = new("TextButton", {Size = UDim2.fromOffset(100, 30),
         Position = UDim2.new(1, -114, 0, 136), BackgroundColor3 = Theme.neon,
         Text = "VERIFY", Font = Enum.Font.GothamBold, TextSize = 11,
         TextColor3 = Color3.new(1,1,1), AutoButtonColor = false, ZIndex = 13}, s1)
     corner(verifyBtn, 8)
     grad(verifyBtn, Theme.neon, Theme.accent3, 0)
-
     local s1Status = new("TextLabel", {Size = UDim2.new(1, -32, 0, 56),
         Position = UDim2.fromOffset(16, 174), BackgroundTransparency = 1,
         Text = "", Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.muted,
@@ -1011,7 +987,6 @@ local function showKeyPrompt()
     corner(s2, 12)
     local s2Stroke = stroke(s2, Theme.strokeSoft, 1.4, 0.4)
     grad(s2, Color3.fromRGB(28, 16, 52), Theme.panel, 90)
-
     local s2Tag = new("Frame", {Size = UDim2.fromOffset(30, 30),
         Position = UDim2.fromOffset(14, 14), BackgroundColor3 = Theme.neon,
         BorderSizePixel = 0, ZIndex = 13}, s2)
@@ -1019,20 +994,17 @@ local function showKeyPrompt()
     local s2TagLbl = new("TextLabel", {Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1, Text = "2", Font = Enum.Font.GothamBlack,
         TextSize = 14, TextColor3 = Color3.new(1,1,1), ZIndex = 14}, s2Tag)
-
     new("TextLabel", {Size = UDim2.new(1, -58, 0, 20),
         Position = UDim2.fromOffset(52, 16), BackgroundTransparency = 1,
         Text = "AUTHORIZE THE APP", Font = Enum.Font.GothamBlack,
         TextSize = 13, TextColor3 = Theme.text,
         TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 13}, s2)
-
     new("TextLabel", {Size = UDim2.new(1, -30, 0, 60),
         Position = UDim2.fromOffset(16, 48), BackgroundTransparency = 1,
         Text = "HOW TO:\n  1.  Click  COPY AUTH LINK  below\n  2.  Open the link → click Authorize\n  3.  Discord will confirm — this screen auto-closes",
         Font = Enum.Font.Gotham, TextSize = 10, TextColor3 = Theme.accent2,
         TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 13}, s2)
-
     local authBtn = new("TextButton", {Size = UDim2.new(1, -32, 0, 36),
         Position = UDim2.fromOffset(16, 122), BackgroundColor3 = Theme.neon,
         Text = "🔒  LOCKED — complete step 1 first", Font = Enum.Font.GothamBold, TextSize = 11,
@@ -1043,10 +1015,8 @@ local function showKeyPrompt()
     authBtn.Active = false
     s2.BackgroundTransparency = 0.55
     s2Stroke.Transparency = 0.75
-
     local step1Passed = false
     local verifiedDiscordUsername = nil
-
     local function unlockStep2(username)
         step1Passed = true
         verifiedDiscordUsername = username
@@ -1057,7 +1027,6 @@ local function showKeyPrompt()
         authBtn.BackgroundColor3 = Theme.neon
         authGrad.Color = ColorSequence.new(Theme.neon, Theme.accent3)
     end
-
     local statusWrap = new("Frame", {Size = UDim2.new(1, -50, 0, 56),
         Position = UDim2.fromOffset(25, 521), BackgroundColor3 = Theme.panel,
         BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 12}, card)
@@ -1080,7 +1049,6 @@ local function showKeyPrompt()
         dot.BackgroundColor3 = col or Theme.gold
         Tween:Create(statusStroke, TweenInfo.new(0.2), {Color = col or Theme.strokeSoft}):Play()
     end
-
     local progWrap = new("Frame", {Size = UDim2.new(1, -50, 0, 5),
         Position = UDim2.fromOffset(25, 585), BackgroundColor3 = Theme.panel2,
         BorderSizePixel = 0, ZIndex = 12}, card)
@@ -1089,11 +1057,9 @@ local function showKeyPrompt()
         BackgroundColor3 = Theme.success, BorderSizePixel = 0, ZIndex = 13}, progWrap)
     corner(progFill, 3)
     grad(progFill, Theme.neon, Theme.success, 0)
-
     local result = {done = false, user = nil}
     local sessionId = nil
     local polling = false
-
     invBtn.MouseButton1Click:Connect(function()
         copyToClipboard(DISCORD_INVITE)
         tryOpenBrowser(DISCORD_INVITE)
@@ -1105,7 +1071,6 @@ local function showKeyPrompt()
             {Size = UDim2.new(0.25, 0, 1, 0)}):Play()
         setStatus("Invite copied. Join the server, then type your username and click VERIFY.", Theme.accent2)
     end)
-
     verifyBtn.MouseButton1Click:Connect(function()
         if step1Passed then return end
         local uname = (userInput.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -1156,7 +1121,6 @@ local function showKeyPrompt()
             end
         end)
     end)
-
     authBtn.MouseButton1Click:Connect(function()
         if not step1Passed then
             setStatus("Complete step 1 before authorizing.", Theme.danger)
@@ -1229,20 +1193,17 @@ local function showKeyPrompt()
             end)
         end
     end)
-
     card.Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2 + 80)
     card.BackgroundTransparency = 1
     Tween:Create(card, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
         {Position = UDim2.new(0.5, -cardW/2, 0.5, -cardH/2), BackgroundTransparency = 0}):Play()
-
     while not result.done do task.wait(0.2) end
     return result.user
 end
 
 --==================== VERIFY SESSION ====================
 local function verifySession()
-    -- [EDIT 3] tryCheck now also calls /check-token on startup
-    -- so a manual app deauth is caught the moment the script runs.
+    -- [EDIT 3] tryCheck also calls /check-token so manual deauth is caught on startup
     local function tryCheck(k)
         if not k then return nil end
         local resp = postJSON("/check", {robloxId = tostring(LP.UserId), key = k})
@@ -1264,7 +1225,6 @@ local function verifySession()
         end
         return nil, resp
     end
-
     local saved = loadVerifiedData()
     if saved and saved.key then
         local user = tryCheck(saved.key)
@@ -1280,7 +1240,6 @@ local function verifySession()
             clearVerifiedData()
         end
     end
-
     local user = showKeyPrompt()
     if user then
         SESSION_KEY = user.key
@@ -1314,8 +1273,7 @@ fetchCountry(function(name, code)
     MY_USER.countryCode = code or ""
 end)
 
--- [EDIT 4] Welcome screen shows on EVERY launch (not only after a fresh verify),
--- so users see their Discord PFP + username + "LOAD SCRIPT" every session.
+-- [EDIT 4] welcome screen shows on EVERY launch
 showVerifiedScreen(verifiedUser)
 
 --==================== DRAG / RESIZE ====================
@@ -1398,6 +1356,7 @@ local prisKW = {"prison", "inmate", "convict", "orange", "jail"}
 local ufKW = {"united front", "unitedfront", "united", "front"}
 local ilKW = {"iron legion", "ironlegion", "iron", "legion"}
 function detectPCP(p)
+    if not p then return nil end
     local t = ""
     if p.Team and p.Team.Name then t = p.Team.Name:lower() end
     if t == "" and p.TeamColor then t = tostring(p.TeamColor):lower() end
@@ -1504,6 +1463,7 @@ function boundKeys()
     if Cfg.UI.HUDKey then b[Cfg.UI.HUDKey] = true end
     if Cfg.UI.ADKey then b[Cfg.UI.ADKey] = true end
     for _, x in pairs(Cfg.Binds or {}) do if x then b[x] = true end end
+    for _, x in pairs(Cfg.TapBinds or {}) do if x then b[x] = true end end
     return b
 end
 function unboundKeys(n)
@@ -1619,7 +1579,6 @@ function notify(title, msg, col, dur, copyText)
     col = col or Theme.neon
     local hasCopy = type(copyText) == "string" and copyText ~= ""
     local cardH = hasCopy and 86 or 68
-
     local card = new("Frame", {Size = UDim2.new(1, 0, 0, 0),
         BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.05,
         BorderSizePixel = 0, ZIndex = 2, ClipsDescendants = true}, notifStack)
@@ -1635,7 +1594,6 @@ function notify(title, msg, col, dur, copyText)
         BackgroundTransparency = 1, Text = msg or "", Font = Enum.Font.Gotham,
         TextSize = 11, TextColor3 = Theme.text, TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, ZIndex = 3}, card)
-
     if hasCopy then
         local copyBtn = new("TextButton", {Size = UDim2.new(1, -28, 0, 20),
             Position = UDim2.fromOffset(20, cardH - 26),
@@ -1656,12 +1614,10 @@ function notify(title, msg, col, dur, copyText)
             end
         end)
     end
-
     card.Position = UDim2.new(1, 60, 0, 0)
     Tween:Create(card, TweenInfo.new(0.45, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
         {Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(1, 0, 0, cardH)}):Play()
     shine(card, col, 0.7)
-
     local lifetime = dur or (hasCopy and 12 or 3.5)
     task.delay(lifetime, function()
         if not card or not card.Parent then return end
@@ -1671,9 +1627,7 @@ function notify(title, msg, col, dur, copyText)
         Tween:Create(st, TweenInfo.new(0.35), {Transparency = 1}):Play()
         t.Completed:Connect(function() card:Destroy() end)
     end)
-end
-
---==================== GUI ROOT ====================
+end--==================== GUI ROOT ====================
 local pg = LP:WaitForChild("PlayerGui")
 gui = new("ScreenGui", {Name = "ReaperUI", ResetOnSpawn = false,
     IgnoreGuiInset = true, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 9999}, pg)
@@ -1720,22 +1674,18 @@ function showAnnouncement(data)
     end)
     local headerH = 60
     local cardHeight = headerH + bodyHeight + 18
-
     local shadow = new("Frame", {Size = UDim2.fromOffset(cardWidth + 14, cardHeight + 14),
         Position = UDim2.fromOffset(-7, -160), BackgroundColor3 = Theme.neon,
         BackgroundTransparency = 0.82, BorderSizePixel = 0, ZIndex = 2}, annSlot)
     corner(shadow, 16)
-
     local card = new("Frame", {Size = UDim2.fromOffset(cardWidth, cardHeight),
         Position = UDim2.new(0, 0, 0, -180), BackgroundColor3 = Theme.bg,
         BackgroundTransparency = 0.02, BorderSizePixel = 0, ZIndex = 3, ClipsDescendants = true}, annSlot)
     corner(card, 14)
     local st = stroke(card, col, 2, 0.1)
     grad(card, Color3.fromRGB(28, 14, 56), Theme.bg, 90)
-
     new("Frame", {Size = UDim2.new(1, 0, 0, 3),
         BackgroundColor3 = col, BorderSizePixel = 0, ZIndex = 4}, card)
-
     local iconPlate = new("Frame", {Size = UDim2.fromOffset(36, 36),
         Position = UDim2.fromOffset(14, 13), BackgroundColor3 = col,
         BackgroundTransparency = 0.85, BorderSizePixel = 0, ZIndex = 4}, card)
@@ -1744,7 +1694,6 @@ function showAnnouncement(data)
     new("TextLabel", {Size = UDim2.fromScale(1, 1),
         BackgroundTransparency = 1, Text = style.emoji, Font = Enum.Font.GothamBlack,
         TextSize = 19, TextColor3 = col, ZIndex = 5}, iconPlate)
-
     new("TextLabel", {Size = UDim2.new(1, -80, 0, 18),
         Position = UDim2.fromOffset(60, 10), BackgroundTransparency = 1,
         Text = string.upper(style.label) .. " ANNOUNCEMENT",
@@ -1760,12 +1709,10 @@ function showAnnouncement(data)
         TextColor3 = Theme.text, TextWrapped = true,
         TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 5}, card)
-
     Tween:Create(card, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
         {Position = UDim2.new(0, 0, 0, 0)}):Play()
     Tween:Create(shadow, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
         {Position = UDim2.fromOffset(-7, 3)}):Play()
-
     local dur = math.clamp(6 + #bodyText * 0.045, 6, 16)
     annCurrent = {card = card, stroke = st, shadow = shadow}
     task.delay(dur, function()
@@ -1838,6 +1785,7 @@ rainbowH = 0
 RS.Heartbeat:Connect(function(dt) rainbowH = (rainbowH + dt * 0.5) % 1 end)
 
 --==================== RETICLE ACTIONS ====================
+-- [PATCH 7] added orbit action and lockedTarget on hump
 function runAction(id)
     local t = TS.hovered
     if not t or not t.Character then
@@ -1862,10 +1810,20 @@ function runAction(id)
         end
     elseif id == "hump" then
         TS.target = t
+        TS.lockedTarget = t
         if not Cfg.Troll.Hump and widgets["Troll.Hump"] then widgets["Troll.Hump"].set(true) end
         HUMP.phase = 0; HUMP.smoothVel = 0; HUMP.smoothAir = 0
         HUMP.lockTimer = 1.5; HUMP.awaitingRespawn = false; HUMP.fallHold = 0
+        HUMP.anchorY = nil; HUMP.lastGoodY = nil; HUMP.oldRootPart = nil
         notify("Humping", t.Name, Theme.gold)
+    elseif id == "orbit" then
+        TS.target = t
+        TS.lockedTarget = t
+        if not Cfg.Orbit.Enabled and widgets["Orbit.Enabled"] then
+            widgets["Orbit.Enabled"].set(true)
+        end
+        ORBIT.angle = 0
+        notify("Orbiting", t.Name .. " · auto-aim + shoot", Theme.accent3, 3)
     end
 end
 function rebuildChips()
@@ -1912,13 +1870,11 @@ LW, LH = 170, 54
 logo = new("TextButton", {Name = "Logo", Size = UDim2.fromOffset(LW, LH),
     Position = UDim2.new(0.5, -LW/2, 0, 12), BackgroundTransparency = 1, Text = "",
     AutoButtonColor = false, ZIndex = 60}, gui)
-
 aura = new("Frame", {Size = UDim2.fromScale(1.1, 1.25),
     Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
     BackgroundColor3 = Theme.neon, BackgroundTransparency = 0.55,
     BorderSizePixel = 0, ZIndex = 1}, logo)
 corner(aura, 16)
-
 back = tBg(new("Frame", {Size = UDim2.fromScale(1, 1),
     Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
     BackgroundColor3 = Theme.bg, BorderSizePixel = 0, ZIndex = 2}, logo))
@@ -1926,7 +1882,6 @@ corner(back, 14)
 grad(back, Color3.fromRGB(22, 10, 44), Theme.bgDeep, 90)
 backStroke = tAcc(stroke(back, Theme.neon, 1.8, 0.15))
 dropShadow(back, 14, 10, 0.6)
-
 ring = new("Frame", {Size = UDim2.fromScale(1, 1),
     Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
     BackgroundTransparency = 1, ZIndex = 3}, logo)
@@ -1938,27 +1893,22 @@ ringG = new("UIGradient", {Color = ColorSequence.new({
     ColorSequenceKeypoint.new(0.66, Color3.fromRGB(180, 220, 255)),
     ColorSequenceKeypoint.new(1, Theme.neon),
 }), Rotation = 0}, ring:FindFirstChildOfClass("UIStroke"))
-
 plate = new("Frame", {Size = UDim2.fromOffset(34, 34),
     Position = UDim2.new(0, 10, 0.5, -17), BackgroundColor3 = Theme.panel,
     BorderSizePixel = 0, ZIndex = 4}, back)
 corner(plate, 4)
-local plateStroke = stroke(plate, Theme.neon, 1.6, 0.1)
+stroke(plate, Theme.neon, 1.6, 0.1)
 plate.Rotation = 45
-
 flame = new("Frame", {Size = UDim2.fromOffset(16, 16),
     Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
     BackgroundColor3 = Theme.neon, BorderSizePixel = 0, Rotation = 0, ZIndex = 5}, plate)
 corner(flame, 4)
 grad(flame, Theme.accent3, Theme.neon, 90)
 stroke(flame, Theme.accent2, 1, 0.3)
-
 new("Frame", {Size = UDim2.fromOffset(7, 7),
     Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
     BackgroundColor3 = Color3.fromRGB(255, 245, 255), BorderSizePixel = 0,
     ZIndex = 6}, plate)
-corner(flame, 4)
-
 title = new("TextLabel", {Size = UDim2.new(1, -60, 0, 24), Position = UDim2.fromOffset(56, 8),
     BackgroundTransparency = 1, Text = "REAPER", Font = Enum.Font.GothamBlack,
     TextSize = 17, TextColor3 = Color3.new(1, 1, 1), TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6}, back)
@@ -1968,11 +1918,9 @@ titleG = new("UIGradient", {Color = ColorSequence.new({
     ColorSequenceKeypoint.new(1, Theme.accent3),
 }), Rotation = 20}, title)
 tAcc(stroke(title, Theme.neon, 1.2, 0.2))
-
 tMuted(new("TextLabel", {Size = UDim2.new(1, -60, 0, 11), Position = UDim2.fromOffset(57, 32),
     BackgroundTransparency = 1, Text = "CLICK · X", Font = Enum.Font.GothamBold,
     TextSize = 7, TextColor3 = Theme.muted, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6}, back))
-
 task.spawn(function()
     while ring.Parent do
         for i = 0, 360, 4 do
@@ -1982,7 +1930,6 @@ task.spawn(function()
         end
     end
 end)
-
 logo.MouseEnter:Connect(function()
     Tween:Create(backStroke, TweenInfo.new(0.15), {Transparency = 0}):Play()
     pulse(back, 1.03, 0.1)
@@ -1998,7 +1945,6 @@ menu = tBg(new("Frame", {Name = "Menu", Size = UDim2.fromOffset(660, 500),
 corner(menu, 14)
 menuStroke = tAcc(stroke(menu, Theme.neon, 2, 0.25))
 dropShadow(menu, 14, 18, 0.7)
-
 if Cfg.UI.MenuBlur then
     local blur = new("BlurEffect", {Size = 8, Parent = Lighting})
     task.spawn(function()
@@ -2009,7 +1955,6 @@ if Cfg.UI.MenuBlur then
         blur:Destroy()
     end)
 end
-
 ambient = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
     ClipsDescendants = true, ZIndex = 2}, menu)
 ambientParts = {}
@@ -2039,18 +1984,15 @@ corner(header, 14)
 grad(header, Color3.fromRGB(48, 20, 90), Color3.fromRGB(6, 3, 14), 90)
 new("Frame", {Size = UDim2.new(1, 0, 0, 2), Position = UDim2.new(0, 0, 1, -2),
     BackgroundColor3 = Theme.neon, BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 32}, header)
-
 tAcc2(new("TextLabel", {Size = UDim2.fromOffset(100, 54), Position = UDim2.fromOffset(14, 0),
     BackgroundTransparency = 1, Text = "REAPER", Font = Enum.Font.GothamBlack,
     TextSize = 17, TextColor3 = Theme.neon, TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Center, ZIndex = 32}, header))
-
 local _badgeLbl = new("TextLabel", {Size = UDim2.new(0, 120, 0, 20),
     Position = UDim2.fromOffset(110, 17), BackgroundTransparency = 1,
     Text = "", Font = Enum.Font.GothamBlack, TextSize = 11,
     TextColor3 = Theme.neon, TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Center, ZIndex = 32}, header)
-
 local _avSize = 38
 local _avWrap = new("Frame", {Size = UDim2.fromOffset(_avSize, _avSize),
     Position = UDim2.new(1, -320, 0.5, -19), BackgroundTransparency = 1, ZIndex = 33}, header)
@@ -2064,7 +2006,6 @@ local _avBorder = new("Frame", {Size = UDim2.fromScale(1, 1),
     BackgroundTransparency = 1, ZIndex = 36}, _avWrap)
 corner(_avBorder, _avSize / 2)
 tAcc(stroke(_avBorder, Theme.neon, 1.6, 0.15))
-
 local _nameLbl = new("TextLabel", {Size = UDim2.new(0, 240, 0, 16),
     Position = UDim2.new(1, -278, 0.5, -19), BackgroundTransparency = 1,
     Text = "@loading…", Font = Enum.Font.GothamBold, TextSize = 11,
@@ -2075,7 +2016,6 @@ local _metaLbl = new("TextLabel", {Size = UDim2.new(0, 240, 0, 13),
     Text = "🌍 —   ⏱ 00:00:00", Font = Enum.Font.Gotham, TextSize = 9,
     TextColor3 = Theme.muted, TextXAlignment = Enum.TextXAlignment.Left,
     TextYAlignment = Enum.TextYAlignment.Center, ZIndex = 33}, header)
-
 task.spawn(function()
     local lastAvatarAttempt = 0
     while _nameLbl.Parent do
@@ -2116,7 +2056,6 @@ task.spawn(function()
         task.wait(0.5)
     end
 end)
-
 closeBtn = new("TextButton", {Size = UDim2.fromOffset(24, 24),
     Position = UDim2.new(1, -32, 0, 9), BackgroundColor3 = Theme.danger, Text = "✕",
     Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = Color3.new(1, 1, 1),
@@ -2132,7 +2071,6 @@ tickerBar = tPanel(new("Frame", {Size = UDim2.new(1, -20, 0, TICKER_HEIGHT),
 corner(tickerBar, 8)
 grad(tickerBar, Color3.fromRGB(20, 10, 40), Color3.fromRGB(3, 2, 8), 90)
 tickerStroke = stroke(tickerBar, Theme.neon, 1.4, 0.3)
-
 tickerLabel = new("TextLabel", {Size = UDim2.new(0, 0, 1, 0), BackgroundTransparency = 1,
     Text = Theme.ticker, Font = Enum.Font.GothamBlack, TextSize = 13,
     TextColor3 = Theme.tickerColor, TextStrokeTransparency = 0.35,
@@ -2143,7 +2081,6 @@ tickerLabelGrad = new("UIGradient", {Color = ColorSequence.new({
     ColorSequenceKeypoint.new(0.5, Theme.tickerAccent),
     ColorSequenceKeypoint.new(1, Theme.tickerColor),
 }), Rotation = 0}, tickerLabel)
-
 tickerX = 0
 task.spawn(function()
     RS.RenderStepped:Connect(function(dt)
@@ -2154,25 +2091,21 @@ task.spawn(function()
         tickerLabel.Position = UDim2.fromOffset(tickerX, 0)
     end)
 end)
-
 rail = tPanel(new("Frame", {Size = UDim2.new(0, 120, 1, -130),
     Position = UDim2.fromOffset(10, 96), BackgroundColor3 = Theme.panel,
     BackgroundTransparency = 0.05, BorderSizePixel = 0, ZIndex = 31}, menu))
 corner(rail, 10)
 new("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, rail)
 new("UIPadding", {PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5)}, rail)
-
 tabIndicator = new("Frame", {Size = UDim2.new(1, -10, 0, 26),
     Position = UDim2.fromOffset(5, 6), BackgroundColor3 = Theme.neon,
     BackgroundTransparency = 0.82, BorderSizePixel = 0, ZIndex = 31}, rail)
 corner(tabIndicator, 6)
 new("UIGradient", {Color = ColorSequence.new(Theme.neon, Theme.accent3)}, tabIndicator)
-
 content = tPanel(new("Frame", {Size = UDim2.new(1, -148, 1, -130),
     Position = UDim2.fromOffset(138, 96), BackgroundColor3 = Theme.panel,
     BackgroundTransparency = 0.05, BorderSizePixel = 0, ZIndex = 31}, menu))
 corner(content, 10)
-
 status = tPanel(new("Frame", {Size = UDim2.new(1, -20, 0, 20),
     Position = UDim2.new(0, 10, 1, -25), BackgroundColor3 = Theme.panel,
     BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 31}, menu))
@@ -2181,7 +2114,6 @@ statusLbl = tMuted(new("TextLabel", {Size = UDim2.new(1, -12, 1, 0),
     Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1, Text = "REAPER",
     Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = Theme.muted,
     TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 32}, status))
-
 makeDraggable(menu, header)
 makeResizable(menu, {minW = Cfg.UI.MinW, minH = Cfg.UI.MinH})
 
@@ -2324,6 +2256,7 @@ function collapsible(pageId, title, open)
     return holder, hdr
 end
 
+-- [PATCH 12 + 13] toggleRow with animated slide on both click and programmatic change
 function toggleRow(pageId, path, label, onChange)
     local page = resolvePage(pageId)
     if not page then return end
@@ -2385,6 +2318,14 @@ function toggleRow(pageId, path, label, onChange)
         local changed = nv ~= state
         state = nv
         setPath(Cfg, path, state)
+        -- [PATCH 13] animate on programmatic change too
+        if changed then
+            local tgoal = state and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+            Tween:Create(thumb, TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+                {Position = tgoal}):Play()
+            Tween:Create(track, TweenInfo.new(0.18, Enum.EasingStyle.Quart),
+                {BackgroundColor3 = state and Theme.neon or Theme.panel2}):Play()
+        end
         render()
         if path == "Troll.Hump" then
             if not state then
@@ -2395,11 +2336,17 @@ function toggleRow(pageId, path, label, onChange)
                     pcall(function() h:ChangeState(Enum.HumanoidStateType.GettingUp) end)
                 end
                 TS.humpWasActive = false
+                TS.lockedTarget = nil
+                HUMP.awaitingRespawn = false
+                HUMP.anchorY = nil
+                HUMP.lastGoodY = nil
+                HUMP.oldRootPart = nil
             else
                 HUMP.phase = 0; HUMP.smoothVel = 0; HUMP.smoothAir = 0
                 HUMP.lockTimer = 1.5; HUMP.lastTier = "STILL"
                 HUMP.awaitingRespawn = false; HUMP.fallHold = 0
                 HUMP.speedMult = 1.0; HUMP.ampMult = 1.0; HUMP.distMult = 1.0
+                HUMP.anchorY = nil; HUMP.lastGoodY = nil; HUMP.oldRootPart = nil
             end
         end
         if fire ~= false and onChange then pcall(onChange, state) end
@@ -2408,12 +2355,19 @@ function toggleRow(pageId, path, label, onChange)
     widgets[path] = {set = set, get = function() return state end,
         rerender = render, refreshKey = refreshKey, label = label}
     render()
+    -- [PATCH 12] animated slide on click
     track.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-            set(not state)
-            pulse(thumb, 1.4, 0.08)
-            flash(track, state and Theme.danger or Theme.success, 0.12)
-            glow(track, state and Theme.danger or Theme.success, 0.4)
+            local turningOn = not state
+            set(turningOn)
+            local tgoal = turningOn and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+            Tween:Create(thumb, TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+                {Position = tgoal}):Play()
+            Tween:Create(track, TweenInfo.new(0.18, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
+                {BackgroundColor3 = turningOn and Theme.neon or Theme.panel2}):Play()
+            pulse(thumb, 1.5, 0.1)
+            flash(track, turningOn and Theme.success or Theme.danger, 0.14)
+            glow(track, turningOn and Theme.success or Theme.danger, 0.5)
         end
     end)
 end
@@ -2826,9 +2780,7 @@ if isMod() then
     table.insert(tabOrder, 2, "owner")
     tabTitles.owner = "👑 OWNER"
 end
-for _, id in ipairs(tabOrder) do makeTab(id, tabTitles[id]) end
-
---==================== MODERATION HELPERS ====================
+for _, id in ipairs(tabOrder) do makeTab(id, tabTitles[id]) end--==================== MODERATION HELPERS ====================
 function doModBan(targetDiscordId, reason, duration)
     if not targetDiscordId or targetDiscordId == "" then
         notify("Ban", "No Discord ID available", Theme.gold, 3); return
@@ -2886,7 +2838,6 @@ local function openQuickMod(target)
         BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.65,
         Text = "", AutoButtonColor = false, ZIndex = 1}, qm)
     catcher.MouseButton1Click:Connect(function() qm:Destroy() end)
-
     local cardW, cardH = 340, 330
     local mx, my = UIS:GetMouseLocation()
     local card = new("Frame", {Size = UDim2.fromOffset(cardW, cardH),
@@ -2911,7 +2862,6 @@ local function openQuickMod(target)
         BackgroundTransparency = 1, Text = "discord: " .. tostring(target.discordId),
         Font = Enum.Font.Code, TextSize = 9, TextColor3 = Theme.accent2,
         TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4}, card)
-
     local reasonBox = tPanel2(new("TextBox", {Size = UDim2.new(1, -28, 0, 26),
         Position = UDim2.fromOffset(14, 70), BackgroundColor3 = Theme.panel2,
         Text = "", PlaceholderText = "reason (optional)", PlaceholderColor3 = Theme.muted,
@@ -2919,7 +2869,6 @@ local function openQuickMod(target)
         ClearTextOnFocus = false, Active = true, Selectable = true, ZIndex = 50}, card))
     corner(reasonBox, 6)
     tStroke(stroke(reasonBox, Theme.strokeSoft, 1))
-
     local function mkBtn(y, label, col, cb)
         local b = new("TextButton", {Size = UDim2.new(1, -28, 0, 26),
             Position = UDim2.fromOffset(14, y), BackgroundColor3 = Theme.panel2,
@@ -3338,6 +3287,8 @@ if isMod() then
 end
 
 --====================== COMBAT ======================
+-- [PATCH 10] new rows: LockTarget, PCPTeamOnly, PredictAim, PredictAmount,
+-- MagicBullet, MagicBulletWalls, and the whole ORBIT section
 do
     local pg2 = "combat"
     section(pg2, "AIMBOT", "🎯")
@@ -3355,6 +3306,20 @@ do
     toggleRow(pg2, "Aimbot.TeamCheck", "Team Check")
     toggleRow(pg2, "Aimbot.VisibleOnly", "Visible Only")
     toggleRow(pg2, "Aimbot.ShowCircle", "Show FOV Circle")
+    toggleRow(pg2, "Aimbot.LockTarget", "Lock Target (stay on same player)")
+    toggleRow(pg2, "Aimbot.PCPTeamOnly", "PCP: only target opposite team")
+    toggleRow(pg2, "Aimbot.PredictAim", "Prediction (lead moving targets)")
+    sliderRow(pg2, "Aimbot.PredictAmount", "Prediction Amount", 0.02, 0.25, 2)
+    toggleRow(pg2, "Aimbot.MagicBullet", "✨ Magic Bullet (best-effort)")
+    toggleRow(pg2, "Aimbot.MagicBulletWalls", "✨ Wallbang (through walls)")
+
+    section(pg2, "ORBIT", "🌀")
+    toggleRow(pg2, "Orbit.Enabled", "Orbit Target")
+    toggleRow(pg2, "Orbit.AutoAim", "Auto-Aim while orbiting")
+    toggleRow(pg2, "Orbit.AutoShoot", "Auto-Shoot while orbiting")
+    sliderRow(pg2, "Orbit.Radius", "Radius", 3, 30, 1)
+    sliderRow(pg2, "Orbit.Speed", "Speed", 3, 40, 1)
+    sliderRow(pg2, "Orbit.Height", "Height Offset", -5, 10, 1)
 
     section(pg2, "TRIGGERBOT", "⚡")
     toggleRow(pg2, "Trigger.Enabled", "Triggerbot")
@@ -3439,9 +3404,7 @@ do
     section(pg2, "PHYSICS", "🌀")
     toggleRow(pg2, "World.GravityEnabled", "Gravity Control")
     sliderRow(pg2, "World.Gravity", "Gravity", 0, 500, 0)
-end
-
---====================== PLAYERS ======================
+end--====================== PLAYERS ======================
 do
     local pg2 = "players"
     section(pg2, "PLAYER LIST", "👥")
@@ -3516,10 +3479,37 @@ do
     corner(clearB, 5)
     tStroke(stroke(clearB, Theme.strokeSoft, 1))
     clearB.MouseButton1Click:Connect(function()
-        TS.target = nil; lbl.Text = "Target: Nearest"
+        TS.target = nil
+        TS.lockedTarget = nil
+        lbl.Text = "Target: Nearest"
     end)
     toggleRow(pg2, "Troll.TapTarget", "Tap to Target")
     sliderRow(pg2, "Troll.TapRadius", "Crosshair Radius", 5, 200, 0)
+
+    -- [PATCH 8] Tap-to-target key bindings
+    section(pg2, "TAP-TO-TARGET BINDS", "⌨")
+    new("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
+        Text = "press key while hovering a player to run the action",
+        Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = Theme.muted,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
+
+    buttonRow(pg2, "Bind: Teleport on hover", "BIND", function(b)
+        pendingKeybind = {path = "TapBinds.teleport", raw = true, btn = b}
+        b.Text = "press…"
+    end)
+    buttonRow(pg2, "Bind: Hump on hover", "BIND", function(b)
+        pendingKeybind = {path = "TapBinds.hump", raw = true, btn = b}
+        b.Text = "press…"
+    end)
+    buttonRow(pg2, "Bind: Orbit on hover", "BIND", function(b)
+        pendingKeybind = {path = "TapBinds.orbit", raw = true, btn = b}
+        b.Text = "press…"
+    end)
+    buttonRow(pg2, "Bind: Spectate on hover", "BIND", function(b)
+        pendingKeybind = {path = "TapBinds.spectate", raw = true, btn = b}
+        b.Text = "press…"
+    end)
 
     section(pg2, "FOLLOW", "👣")
     toggleRow(pg2, "Troll.FollowTarget", "Follow Target")
@@ -3713,16 +3703,8 @@ statusLbl.Text = "REAPER  ·  place " .. tostring(game.PlaceId) ..
     (DISCORD_USERNAME and ("  ·  @" .. DISCORD_USERNAME) or "")
 pcall(refreshHUD)
 pcall(refreshAD)
-rebuildChips()
-
---==================== PERIODIC VERIFICATION CHECK ====================
--- [EDIT 6] Every 60s: light /check. Every 5th check (5min): full /check-token
--- so a manual app deauth is caught within 5 minutes from inside the game.
--- [EDIT 7] forceRePrompt now takes a `kick` flag — when true, the user is
--- kicked 2 seconds after the deauth notification so they can't keep exploiting
--- client-side while in the re-prompt modal.
--- [EDIT 8] The deauth path passes kick=true so a manual app removal = instant
--- kick. The guild-left path stays kick=false (soft in-place re-prompt).
+rebuildChips()--==================== PERIODIC VERIFICATION CHECK ====================
+-- [EDIT 6/7/8] Every 60s /check. Every 5th (5min) /check-token with kick.
 task.spawn(function()
     local rePrompting = false
     local counter = 0
@@ -3767,7 +3749,6 @@ task.spawn(function()
         task.wait(60)
         counter = counter + 1
         if not SESSION_KEY or rePrompting then continue end
-
         if counter % 5 == 0 then
             local tokenResp = postJSON("/check-token",
                 {robloxId = tostring(LP.UserId), key = SESSION_KEY})
@@ -3776,7 +3757,6 @@ task.spawn(function()
                 continue
             end
         end
-
         local resp = postJSON("/check", {robloxId = tostring(LP.UserId), key = SESSION_KEY})
         if resp and not resp.valid then
             forceRePrompt("You left the Discord — re-verify to continue.")
@@ -3946,6 +3926,38 @@ function tbFocused()
     local ok, tb = pcall(function() return UIS:GetFocusedTextBox() end)
     return ok and tb ~= nil
 end
+
+-- [PATCH 9] hover helper for tap-to-target keybinds
+function getHoveredPlayer()
+    local m = UIS:GetMouseLocation()
+    local ray = Cam:ViewportPointToRay(m.X, m.Y)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {LP.Character}
+    local res = workspace:Raycast(ray.Origin, ray.Direction * 3000, params)
+    if res and res.Instance then
+        local model = res.Instance:FindFirstAncestorOfClass("Model")
+        if model then
+            local p = Players:GetPlayerFromCharacter(model)
+            if p and p ~= LP then return p end
+        end
+    end
+    local best, bestD = nil, 40
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP and p.Character then
+            local head = p.Character:FindFirstChild("Head")
+            if head then
+                local sp, on = Cam:WorldToViewportPoint(head.Position)
+                if on and sp.Z > 0 then
+                    local d = (Vector2.new(sp.X, sp.Y) - m).Magnitude
+                    if d <= bestD then best, bestD = p, d end
+                end
+            end
+        end
+    end
+    return best
+end
+
 UIS.InputBegan:Connect(function(i, gpe)
     if pendingKeybind then
         local path = pendingKeybind.path
@@ -3985,6 +3997,29 @@ UIS.InputBegan:Connect(function(i, gpe)
         if RA.keys.teleport and i.KeyCode == RA.keys.teleport then runAction("teleport"); return end
         if RA.keys.spectate and i.KeyCode == RA.keys.spectate then runAction("spectate"); return end
         if RA.keys.hump and i.KeyCode == RA.keys.hump and Cfg.Troll.Hump then runAction("hump"); return end
+
+        -- [PATCH 9] tap-to-target binds — only fire if a player is under the crosshair
+        local tbind = Cfg.TapBinds or {}
+        if (tbind.teleport and i.KeyCode == tbind.teleport) or
+           (tbind.hump and i.KeyCode == tbind.hump) or
+           (tbind.orbit and i.KeyCode == tbind.orbit) or
+           (tbind.spectate and i.KeyCode == tbind.spectate) then
+            local hovered = getHoveredPlayer()
+            if not hovered or not hovered.Character then
+                return  -- no target → do nothing, don't notify
+            end
+            TS.hovered = hovered
+            if tbind.teleport and i.KeyCode == tbind.teleport then
+                runAction("teleport")
+            elseif tbind.hump and i.KeyCode == tbind.hump then
+                runAction("hump")
+            elseif tbind.orbit and i.KeyCode == tbind.orbit then
+                runAction("orbit")
+            elseif tbind.spectate and i.KeyCode == tbind.spectate then
+                runAction("spectate")
+            end
+            return
+        end
     end
     if gpe then return end
     if i.UserInputType == Enum.UserInputType.MouseButton2 and Cfg.Aimbot.Enabled and not tbFocused() then
@@ -3995,9 +4030,11 @@ UIS.InputBegan:Connect(function(i, gpe)
         local p = TS.hovered
         if p then
             TS.target = p
+            TS.lockedTarget = p
             HUMP.phase = 0; HUMP.smoothVel = 0; HUMP.smoothAir = 0
             HUMP.lockTimer = 1.0; HUMP.awaitingRespawn = false
             HUMP.fallHold = 0; HUMP.speedMult = 1.0; HUMP.ampMult = 1.0; HUMP.distMult = 1.0
+            HUMP.anchorY = nil; HUMP.lastGoodY = nil; HUMP.oldRootPart = nil
             notify("Locked on", p.Name, Theme.success, 2.5)
         end
         return
@@ -4045,6 +4082,24 @@ fovCircle = new("Frame", {AnchorPoint = Vector2.new(0.5, 0.5),
     BackgroundTransparency = 1, Visible = false, ZIndex = 1}, gui)
 corner(fovCircle, 10000)
 tAcc(stroke(fovCircle, Theme.neon, 1, 0.4))
+
+-- [PATCH 3] PCP role filter + target locking + prediction
+local function pcpAllowed(p)
+    if not Cfg.Aimbot.PCPTeamOnly then return true end
+    if Cfg.Visuals.Mode ~= "PCP" then return true end
+    local myRole = detectPCP(LP)
+    local theirRole = detectPCP(p)
+    if not myRole or not theirRole then return true end
+    if myRole == "criminal" then
+        return theirRole == "police"
+    elseif myRole == "prisoner" then
+        return theirRole == "police"
+    elseif myRole == "police" then
+        return theirRole == "criminal"
+    end
+    return true
+end
+
 function aimTarget()
     local c = LP.Character
     if not c then return nil end
@@ -4052,9 +4107,35 @@ function aimTarget()
     if not mR then return nil end
     local center = Vector2.new(Cam.ViewportSize.X / 2, Cam.ViewportSize.Y / 2)
     local maxD = Cfg.Aimbot.FOV
+
+    -- Locked target takes priority if still valid and within 1.5x FOV
+    if Cfg.Aimbot.LockTarget and TS.lockedTarget then
+        local lt = TS.lockedTarget
+        if lt.Parent and lt.Character then
+            local tH = lt.Character:FindFirstChildOfClass("Humanoid")
+            if tH and tH.Health > 0 and pcpAllowed(lt) then
+                local part = lt.Character:FindFirstChild(Cfg.Aimbot.TargetPart)
+                          or lt.Character:FindFirstChild("Head")
+                if part then
+                    local sd = (mR.Position - part.Position).Magnitude
+                    if sd <= Cfg.Aimbot.MaxDist then
+                        local sp, on = Cam:WorldToViewportPoint(part.Position)
+                        if on and sp.Z > 0 then
+                            local d = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+                            if d <= maxD * 1.5 then
+                                return part, lt
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        TS.lockedTarget = nil
+    end
+
     local best, bestD, bestPart = nil, maxD, nil
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LP and p.Character then
+        if p ~= LP and p.Character and pcpAllowed(p) then
             local skip = Cfg.Aimbot.TeamCheck and isAlly(p)
             if not skip then
                 local tH = p.Character:FindFirstChildOfClass("Humanoid")
@@ -4085,28 +4166,181 @@ function aimTarget()
             end
         end
     end
+    if best and Cfg.Aimbot.LockTarget then
+        TS.lockedTarget = best
+    end
     return bestPart, best
 end
+
+-- [PATCH 4] render loop with prediction, distance-aware smoothing, Scriptable-cam awareness
 RS.RenderStepped:Connect(function(dt)
     pcall(function()
         local showFov = Cfg.Aimbot.Enabled and Cfg.Aimbot.ShowCircle
         if fovCircle.Visible ~= showFov then fovCircle.Visible = showFov end
         if showFov then fovCircle.Size = UDim2.fromOffset(Cfg.Aimbot.FOV * 2, Cfg.Aimbot.FOV * 2) end
-        if not Cfg.Aimbot.Enabled then aiming = false; aimToggled = false; return end
+        if not Cfg.Aimbot.Enabled then
+            aiming = false; aimToggled = false
+            if TS.lockedTarget then TS.lockedTarget = nil end
+            return
+        end
         if Cfg.Aimbot.ToggleMode then aiming = aimToggled
         else aiming = bindDown(Cfg.Aimbot.Key) end
         if not aiming then return end
-        local part = aimTarget()
+        local part, target = aimTarget()
         if not part then return end
+
+        -- Prediction: lead moving targets
+        local aimPos = part.Position
+        if Cfg.Aimbot.PredictAim then
+            local vel = part.AssemblyLinearVelocity
+            if vel.Magnitude > 1 then
+                local dist = (aimPos - Cam.CFrame.Position).Magnitude
+                local delay = math.clamp(dist / 2000, 0.02, Cfg.Aimbot.PredictAmount + 0.02)
+                aimPos = aimPos + vel * delay
+            end
+        end
+
         local s = Cfg.Aimbot.Strength
         if Cfg.Aimbot.Humanize then s = s * (0.85 + math.random() * 0.3) end
         local sm = math.max(Cfg.Aimbot.Smoothness, 1)
-        local a = math.clamp(dt * (s / sm) * 30, 0, 1)
-        Cam.CFrame = Cam.CFrame:Lerp(CFrame.new(Cam.CFrame.Position, part.Position), a)
+        local dist = (aimPos - Cam.CFrame.Position).Magnitude
+        local distFactor = math.clamp(500 / math.max(dist, 50), 0.4, 1.6)
+        local a = math.clamp(dt * (s / sm) * 30 * distFactor, 0, 1)
+        if Cam.CameraType == Enum.CameraType.Scriptable then
+            a = math.min(a * 3, 1)
+        end
+        Cam.CFrame = Cam.CFrame:Lerp(CFrame.lookAt(Cam.CFrame.Position, aimPos), a)
     end)
 end)
 
---==================== TRIGGERBOT ====================
+-- [PATCH 5] Magic Bullet + Wallbang (best-effort, only works on client-side hitreg games)
+pcall(function()
+    local mt = getrawmetatable(game)
+    if not mt then return end
+    local oldIndex = mt.__index
+    local oldNamecall = mt.__namecall
+    if not oldIndex or not oldNamecall then return end
+    setreadonly(mt, false)
+
+    local function getMBTarget()
+        if not (Cfg.Aimbot.MagicBullet and Cfg.Aimbot.Enabled) then return nil end
+        local t = TS.lockedTarget
+        if not t or not t.Parent or not t.Character then return nil end
+        local h = t.Character:FindFirstChildOfClass("Humanoid")
+        if not h or h.Health <= 0 then return nil end
+        return t
+    end
+
+    mt.__index = newcclosure(function(self, key)
+        local t = getMBTarget()
+        if t then
+            local mouse = LP:GetMouse()
+            if self == mouse then
+                local head = t.Character:FindFirstChild(Cfg.Aimbot.TargetPart)
+                          or t.Character:FindFirstChild("Head")
+                if head then
+                    if key == "Hit" then
+                        return CFrame.new(head.Position)
+                    elseif key == "Target" then
+                        return head
+                    elseif key == "UnitRay" then
+                        return Ray.new(Cam.CFrame.Position, (head.Position - Cam.CFrame.Position).Unit)
+                    end
+                end
+            end
+        end
+        return oldIndex(self, key)
+    end)
+
+    mt.__namecall = newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+        local t = getMBTarget()
+        if t then
+            local head = t.Character:FindFirstChild(Cfg.Aimbot.TargetPart)
+                      or t.Character:FindFirstChild("Head")
+            if head then
+                local args = {...}
+                if method == "Raycast" and #args >= 2 then
+                    local origin, direction = args[1], args[2]
+                    if typeof(origin) == "Vector3" and typeof(direction) == "Vector3" then
+                        args[2] = (head.Position - origin).Unit * (direction.Magnitude + 200)
+                        if Cfg.Aimbot.MagicBulletWalls and #args >= 3 then
+                            local newP = RaycastParams.new()
+                            newP.FilterType = Enum.RaycastFilterType.Include
+                            newP.FilterDescendantsInstances = {t.Character}
+                            args[3] = newP
+                        end
+                        return oldNamecall(self, unpack(args))
+                    end
+                elseif (method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList"
+                    or method == "FindPartOnRayWithWhitelist") and #args >= 1 then
+                    local ray = args[1]
+                    if typeof(ray) == "Ray" then
+                        args[1] = Ray.new(ray.Origin, (head.Position - ray.Origin).Unit * (ray.Direction.Magnitude + 200))
+                        if Cfg.Aimbot.MagicBulletWalls and method == "FindPartOnRayWithWhitelist" and #args >= 2 then
+                            args[2] = {t.Character}
+                        end
+                        return oldNamecall(self, unpack(args))
+                    end
+                end
+            end
+        end
+        return oldNamecall(self, ...)
+    end)
+
+    setreadonly(mt, true)
+end)
+
+-- [PATCH 6] Orbit heartbeat
+RS.Heartbeat:Connect(function(dt)
+    pcall(function()
+        if not Cfg.Orbit.Enabled then
+            if ORBIT.wasActive then
+                local h = hum()
+                if h and not Cfg.Troll.Hump then
+                    h.PlatformStand = false
+                    h.AutoRotate = true
+                end
+                ORBIT.wasActive = false
+            end
+            return
+        end
+        local t = TS.lockedTarget or TS.target
+        if not t or not t.Parent or not t.Character then return end
+        local tc = t.Character
+        local tR = tc:FindFirstChild("HumanoidRootPart")
+        local tH = tc:FindFirstChildOfClass("Humanoid")
+        local mR = hrp()
+        local mH = hum()
+        if not (tR and tH and tH.Health > 0 and mR and mH) then return end
+        ORBIT.wasActive = true
+        if not mH.PlatformStand then mH.PlatformStand = true end
+        mH.AutoRotate = false
+        ORBIT.angle = ORBIT.angle + dt * Cfg.Orbit.Speed
+        local rad = Cfg.Orbit.Radius
+        local hgt = Cfg.Orbit.Height
+        local offset = Vector3.new(math.cos(ORBIT.angle) * rad, hgt, math.sin(ORBIT.angle) * rad)
+        local desired = tR.Position + offset
+        mR.CFrame = CFrame.lookAt(desired, tR.Position + Vector3.new(0, hgt, 0))
+        mR.AssemblyLinearVelocity = Vector3.zero
+        mR.AssemblyAngularVelocity = Vector3.zero
+        if Cfg.Orbit.AutoAim then
+            local head = tc:FindFirstChild(Cfg.Aimbot.TargetPart) or tc:FindFirstChild("Head")
+            if head then
+                Cam.CFrame = CFrame.lookAt(Cam.CFrame.Position, head.Position)
+            end
+        end
+        ORBIT.shootCD = ORBIT.shootCD - dt
+        if Cfg.Orbit.AutoShoot and ORBIT.shootCD <= 0 then
+            ORBIT.shootCD = 0.05
+            pcall(function()
+                local m = LP:GetMouse()
+                VirtualUser:CaptureController()
+                VirtualUser:ClickButton1(Vector2.new(m.X, m.Y))
+            end)
+        end
+    end)
+end)--==================== TRIGGERBOT ====================
 triggerAcc = 0
 RS.Heartbeat:Connect(function(dt)
     pcall(function()
@@ -4543,9 +4777,7 @@ UIS.JumpRequest:Connect(function()
     if not Cfg.Movement.InfiniteJump then return end
     local h = hum()
     if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
-end)
-
---==================== FLING ====================
+end)--==================== FLING ====================
 flinging = false
 function flingPlayer(p)
     if flinging or not p or not p.Character then return end
@@ -4598,6 +4830,7 @@ function getTargetPlayer()
     return best
 end
 
+-- Auto-detect heartbeat (speed/tier tracking)
 RS.Heartbeat:Connect(function(dt)
     pcall(function()
         if not Cfg.Troll.HumpAutoDetect then return end
@@ -4650,6 +4883,7 @@ RS.Heartbeat:Connect(function(dt)
     end)
 end)
 
+-- [PATCH 11] Hump positioning + fall/respawn/desync improvements
 RS.Heartbeat:Connect(function(dt)
     pcall(function()
         if Cfg.Troll.FollowTarget then
@@ -4675,43 +4909,63 @@ RS.Heartbeat:Connect(function(dt)
                     local mR = mC:FindFirstChild("HumanoidRootPart")
                     local mH = mC:FindFirstChildOfClass("Humanoid")
                     if not (mR and mH) then return end
-                    if HUMP.awaitingRespawn then
-                        if t.Character and t.Character:FindFirstChild("HumanoidRootPart") then
-                            local newH = t.Character:FindFirstChildOfClass("Humanoid")
-                            if newH and newH.Health > 0 then
-                                HUMP.awaitingRespawn = false
-                                HUMP.fallHold = 0; HUMP.phase = 0
-                                HUMP.lastGoodCF = nil
-                                notify("Target respawned", t.Name, Theme.success, 2)
-                            end
-                        end
-                        mR.AssemblyLinearVelocity = Vector3.zero
-                        mR.AssemblyAngularVelocity = Vector3.zero
-                        if not Cfg.Troll.HumpUsePlatform then
-                            if mH.PlatformStand then mH.PlatformStand = false end
-                        else
-                            if not mH.PlatformStand then mH.PlatformStand = true end
-                        end
-                        TS.humpWasActive = true
-                        return
-                    end
                     local tR = t.Character and t.Character:FindFirstChild("HumanoidRootPart")
                     local tH = t.Character and t.Character:FindFirstChildOfClass("Humanoid")
+
+                    -- Respawn handling: wait for NEW root part (fresh character)
+                    if HUMP.awaitingRespawn then
+                        if tR and tH and tH.Health > 0 and tR ~= HUMP.oldRootPart then
+                            HUMP.awaitingRespawn = false
+                            HUMP.oldRootPart = nil
+                            HUMP.fallHold = 0; HUMP.phase = 0
+                            HUMP.lastGoodCF = nil
+                            HUMP.lastGoodY = nil
+                            HUMP.anchorY = nil
+                            HUMP.initialAnchor = nil
+                            notify("Target respawned", t.Name, Theme.success, 2)
+                        else
+                            if HUMP.lastGoodCF then mR.CFrame = HUMP.lastGoodCF end
+                            mR.AssemblyLinearVelocity = Vector3.zero
+                            mR.AssemblyAngularVelocity = Vector3.zero
+                            TS.humpWasActive = true
+                            return
+                        end
+                    end
+
+                    -- Dead / gone
                     if not tR or not tH or tH.Health <= 0 then
                         if Cfg.Troll.HumpFallProtect then
-                            HUMP.awaitingRespawn = true
+                            if not HUMP.awaitingRespawn then
+                                HUMP.oldRootPart = tR
+                                HUMP.awaitingRespawn = true
+                            end
+                            if HUMP.lastGoodCF then mR.CFrame = HUMP.lastGoodCF end
                             mR.AssemblyLinearVelocity = Vector3.zero
                             mR.AssemblyAngularVelocity = Vector3.zero
                         end
                         TS.humpWasActive = true
                         return
                     end
+
                     local tY = tR.Position.Y
                     local tVelY = tR.AssemblyLinearVelocity.Y
-                    local isFalling = (tY < -40) or (tVelY < -75)
-                    if isFalling and Cfg.Troll.HumpFallProtect then
+                    local tVel = tR.AssemblyLinearVelocity
+
+                    -- Anchor Y tracking (recent safe Y position)
+                    if not HUMP.anchorY then HUMP.anchorY = tY end
+                    if tY > HUMP.anchorY - 30 then
+                        HUMP.anchorY = math.max(HUMP.anchorY, tY)
+                    end
+
+                    -- Deadly fall detection (under map / big drop / fast fall)
+                    local isUnderMap    = tY < -30
+                    local isBigDrop     = (HUMP.anchorY - tY) > 300
+                    local isFastFall    = tVelY < -200
+                    local isDeadlyFall  = isUnderMap or isBigDrop or isFastFall
+
+                    if isDeadlyFall and Cfg.Troll.HumpFallProtect then
                         HR.fallingUnder = true
-                        HUMP.fallHold = 2.5
+                        HUMP.fallHold = 3
                         if HUMP.lastGoodCF then
                             mR.CFrame = HUMP.lastGoodCF
                             mR.AssemblyLinearVelocity = Vector3.zero
@@ -4720,8 +4974,10 @@ RS.Heartbeat:Connect(function(dt)
                         TS.humpWasActive = true
                         return
                     end
+
                     if HUMP.fallHold > 0 then
                         HUMP.fallHold = HUMP.fallHold - dt
+                        if HUMP.lastGoodCF then mR.CFrame = HUMP.lastGoodCF end
                         mR.AssemblyLinearVelocity = Vector3.zero
                         mR.AssemblyAngularVelocity = Vector3.zero
                         TS.humpWasActive = true
@@ -4729,7 +4985,13 @@ RS.Heartbeat:Connect(function(dt)
                         return
                     end
                     HR.fallingUnder = false
-                    if tY > -20 then HUMP.lastGoodCF = mR.CFrame end
+
+                    -- Update last safe position
+                    if tY > -20 and tVelY > -100 then
+                        HUMP.lastGoodCF = mR.CFrame
+                        HUMP.lastGoodY = tY
+                    end
+
                     if Cfg.Troll.HumpKeepOwner then
                         pcall(function() mR:SetNetworkOwner(LP) end)
                     end
@@ -4746,9 +5008,11 @@ RS.Heartbeat:Connect(function(dt)
                     local useDist = math.clamp(Cfg.Troll.HumpDist * dm_, 0.5, 8)
                     HUMP.phase = HUMP.phase + dt * useSpeed
                     if HUMP.phase > math.pi * 2000 then HUMP.phase = HUMP.phase % (math.pi * 2) end
-                    local pos = tR.Position
+
+                    -- Desync prediction: extrapolate target position by velocity
+                    local predictLead = math.clamp(tVel.Magnitude / 500, 0, 0.12)
+                    local pos = tR.Position + tVel * predictLead
                     local look = tR.CFrame.LookVector
-                    local vel = tR.AssemblyLinearVelocity
                     local thrust = math.sin(HUMP.phase) * useAmp
                     local behindPos = pos - look * (useDist - thrust)
                     local want = Vector3.new(behindPos.X, pos.Y, behindPos.Z)
@@ -4762,7 +5026,7 @@ RS.Heartbeat:Connect(function(dt)
                     local posAlpha = 1 - math.exp(-25 * dt)
                     mR.CFrame = mR.CFrame:Lerp(cf, posAlpha)
                     mR.AssemblyAngularVelocity = Vector3.zero
-                    if Cfg.Troll.HumpVelMatch then mR.AssemblyLinearVelocity = vel
+                    if Cfg.Troll.HumpVelMatch then mR.AssemblyLinearVelocity = tVel
                     else mR.AssemblyLinearVelocity = Vector3.zero end
                     if Cfg.Movement.Noclip then noclipChar(mC) end
                     TS.humpWasActive = true
@@ -4791,6 +5055,7 @@ RS.Heartbeat:Connect(function(dt)
             HUMP.phase = 0; HUMP.smoothVel = 0; HUMP.smoothAir = 0
             HUMP.awaitingRespawn = false; HUMP.fallHold = 0
             HR.fallingUnder = false
+            HUMP.anchorY = nil; HUMP.lastGoodY = nil; HUMP.oldRootPart = nil
         end
         pcall(refreshAD)
     end)
