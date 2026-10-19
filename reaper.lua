@@ -4030,55 +4030,62 @@ RS.RenderStepped:Connect(function(dt)
     end)
 end)
 
---==================== MAGIC BULLET (mouse.Hit only - SAFE) ====================
--- NOTE: We do NOT hook __namecall / Raycast - that's what crashed your game.
--- Only mouse.Hit, mouse.Target, mouse.UnitRay are overridden, which is safe.
+--==================== MAGIC BULLET (SAFE - cached, no recursion) ====================
+-- The hook NEVER reads instance properties - it only reads MB_CACHE.
+-- Values are precomputed every Heartbeat outside the hook. Zero recursion possible.
+MB_CACHE = {active = false, hit = nil, target = nil, ray = nil}
+
+RS.Heartbeat:Connect(function()
+    MB_CACHE.active = false
+    MB_CACHE.hit = nil
+    MB_CACHE.target = nil
+    MB_CACHE.ray = nil
+    local wantAim = Cfg.Aimbot.MagicBullet and Cfg.Aimbot.Enabled and not Cfg.Orbit.Enabled and aiming
+    local wantOrbit = Cfg.Orbit.Enabled and Cfg.Orbit.AutoShoot and ORBIT.wasActive
+    if not (wantAim or wantOrbit) then return end
+    local t = TS.lockedTarget
+    if not t then return end
+    local ok, hit, tgt, ray = pcall(function()
+        if not t.Parent then return nil end
+        local char = t.Character
+        if not char then return nil end
+        local h = char:FindFirstChildOfClass("Humanoid")
+        if not h or h.Health <= 0 then return nil end
+        local head = char:FindFirstChild(Cfg.Aimbot.TargetPart) or char:FindFirstChild("Head")
+        if not head then return nil end
+        return CFrame.new(head.Position),
+               head,
+               Ray.new(Cam.CFrame.Position, (head.Position - Cam.CFrame.Position).Unit)
+    end)
+    if ok and hit and tgt and ray then
+        MB_CACHE.active = true
+        MB_CACHE.hit = hit
+        MB_CACHE.target = tgt
+        MB_CACHE.ray = ray
+    end
+end)
+
 pcall(function()
     local mt = getrawmetatable(game)
     if not mt then return end
     local oldIndex = mt.__index
     if not oldIndex then return end
     setreadonly(mt, false)
-
-    local MB_REENTRY = false
-
-    local function getMBTarget()
-        if MB_REENTRY then return nil end
-        local aimActive = Cfg.Aimbot.MagicBullet and Cfg.Aimbot.Enabled and not Cfg.Orbit.Enabled and aiming
-        local orbitActive = Cfg.Orbit.Enabled and Cfg.Orbit.AutoShoot and ORBIT.wasActive
-        if not (aimActive or orbitActive) then return nil end
-        local t = TS.lockedTarget
-        if not t or not t.Parent or not t.Character then return nil end
-        local h = t.Character:FindFirstChildOfClass("Humanoid")
-        if not h or h.Health <= 0 then return nil end
-        return t
-    end
-
     mt.__index = newcclosure(function(self, key)
-        local t = getMBTarget()
-        if t then
-            local mouse = LP:GetMouse()
-            if self == mouse then
-                local head = t.Character:FindFirstChild(Cfg.Aimbot.TargetPart) or t.Character:FindFirstChild("Head")
-                if head then
-                    if key == "Hit" then return CFrame.new(head.Position)
-                    elseif key == "Target" then return head
-                    elseif key == "UnitRay" then
-                        return Ray.new(Cam.CFrame.Position, (head.Position - Cam.CFrame.Position).Unit)
-                    end
-                end
-            end
+        if MB_CACHE.active then
+            if key == "Hit" then return MB_CACHE.hit end
+            if key == "Target" then return MB_CACHE.target end
+            if key == "UnitRay" then return MB_CACHE.ray end
         end
         return oldIndex(self, key)
     end)
-
     setreadonly(mt, true)
 end)
 
 --==================== ORBIT ====================
 RS.Heartbeat:Connect(function(dt)
     pcall(function()
-        if not Cfg.Orbit.Enabled then
+               if not Cfg.Orbit.Enabled then
             if ORBIT.wasActive then
                 local h = hum()
                 if h and not Cfg.Troll.Hump then
@@ -4086,6 +4093,12 @@ RS.Heartbeat:Connect(function(dt)
                     h.AutoRotate = true
                 end
                 ORBIT.wasActive = false
+                if Cam.CameraType == Enum.CameraType.Scriptable
+                    and not RA.spectateActive
+                    and not Cfg.Movement.Freecam then
+                    Cam.CameraType = Enum.CameraType.Custom
+                    UIS.MouseBehavior = Enum.MouseBehavior.Default
+                end
             end
             if orbitCircle.Transparency < 1 then orbitCircle.Transparency = 1 end
             if orbitCircleLocked.Transparency < 1 then orbitCircleLocked.Transparency = 1 end
