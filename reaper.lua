@@ -2510,57 +2510,70 @@ end
 
 if isMod() then
     local pg2 = "owner"
-    section(pg2, "LIVE ANNOUNCEMENTS", "📢")
+    section(pg2, "LIVE ANNOUNCEMENTS", "ANNOUNCE")
     new("TextLabel", {Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1,
         Text = "broadcast to every REAPER user in every server",
         Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = Theme.muted,
         TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
     local annBox = tPanel2(new("TextBox", {Size = UDim2.new(1, 0, 0, 70), BackgroundColor3 = Theme.panel2,
         BackgroundTransparency = 0.15, BorderSizePixel = 0, Text = "", Active = true, Selectable = true,
-        PlaceholderText = "type your announcement…", PlaceholderColor3 = Theme.muted,
+        PlaceholderText = "type your announcement...", PlaceholderColor3 = Theme.muted,
         Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = Theme.text, MultiLine = true,
         ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 50}, pages[pg2]))
-    corner(annBox, 8); tStroke(stroke(annBox, Theme.strokeSoft, 1))
-    buttonRow(pg2, "Send to everyone", "📢 SEND", function() local txt = annBox.Text or ""; if sendAnnouncement(txt) then annBox.Text = "" end end)
+    corner(annBox, 8)
+    tStroke(stroke(annBox, Theme.strokeSoft, 1))
+    buttonRow(pg2, "Send to everyone", "SEND", function()
+        local txt = annBox.Text or ""
+        if sendAnnouncement(txt) then annBox.Text = "" end
+    end)
     buttonRow(pg2, "Preview locally", "PREVIEW", function()
         local txt = annBox.Text or ""
-        if txt:gsub("%s", "") == "" then notify("Preview", "Type a message first", Theme.gold, 2); return end
+        if txt:gsub("%s", "") == "" then
+            notify("Preview", "Type a message first", Theme.gold, 2)
+            return
+        end
         showAnnouncement({text = txt, sender = LP.Name, userId = LP.UserId, rank = getLocalRank() or "owner", time = os.time()})
     end)
 
-    section(pg2, "CHAT MODERATION CONSOLE", "🛡")
+    section(pg2, "CHAT MODERATION CONSOLE", "MOD")
     local banBox = tPanel2(new("TextBox", {Size = UDim2.new(1, 0, 0, 28), BackgroundColor3 = Theme.panel2,
         BackgroundTransparency = 0.1, BorderSizePixel = 0, Text = "", Active = true, Selectable = true,
         PlaceholderText = "target Discord ID (17-20 digits)", PlaceholderColor3 = Theme.muted,
         Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = Theme.text, ClearTextOnFocus = false,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 50}, pages[pg2]))
-    corner(banBox, 7); tStroke(stroke(banBox, Theme.strokeSoft, 1))
+    corner(banBox, 7)
+    tStroke(stroke(banBox, Theme.strokeSoft, 1))
     local reasonBox = tPanel2(new("TextBox", {Size = UDim2.new(1, 0, 0, 28), BackgroundColor3 = Theme.panel2,
         BackgroundTransparency = 0.1, BorderSizePixel = 0, Text = "", Active = true, Selectable = true,
         PlaceholderText = "reason (optional)", PlaceholderColor3 = Theme.muted,
         Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = Theme.text, ClearTextOnFocus = false,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 50}, pages[pg2]))
-    corner(reasonBox, 7); tStroke(stroke(reasonBox, Theme.strokeSoft, 1))
+    corner(reasonBox, 7)
+    tStroke(stroke(reasonBox, Theme.strokeSoft, 1))
     buttonRow(pg2, "Timeout 5 min", "5M", function()
         local t = (banBox.Text or ""):gsub("%s", "")
         if t == "" then notify("Ban", "Enter a Discord ID first", Theme.gold, 2); return end
-        doModBan(t, reasonBox.Text, 300); reasonBox.Text = ""
+        doModBan(t, reasonBox.Text, 300)
+        reasonBox.Text = ""
     end)
     buttonRow(pg2, "Timeout 1 hour", "1H", function()
         local t = (banBox.Text or ""):gsub("%s", "")
         if t == "" then notify("Ban", "Enter a Discord ID first", Theme.gold, 2); return end
-        doModBan(t, reasonBox.Text, 3600); reasonBox.Text = ""
+        doModBan(t, reasonBox.Text, 3600)
+        reasonBox.Text = ""
     end)
     buttonRow(pg2, "Timeout 24 hours", "24H", function()
         local t = (banBox.Text or ""):gsub("%s", "")
         if t == "" then notify("Ban", "Enter a Discord ID first", Theme.gold, 2); return end
-        doModBan(t, reasonBox.Text, 86400); reasonBox.Text = ""
+        doModBan(t, reasonBox.Text, 86400)
+        reasonBox.Text = ""
     end)
     buttonRow(pg2, "Ban permanently", "BAN", function()
         local t = (banBox.Text or ""):gsub("%s", "")
         if t == "" then notify("Ban", "Enter a Discord ID first", Theme.gold, 2); return end
-        doModBan(t, reasonBox.Text, 0); reasonBox.Text = ""
+        doModBan(t, reasonBox.Text, 0)
+        reasonBox.Text = ""
     end)
     buttonRow(pg2, "Unban user", "UNBAN", function()
         local t = (banBox.Text or ""):gsub("%s", "")
@@ -2568,12 +2581,16 @@ if isMod() then
         task.spawn(function()
             local body = HttpService:JSONEncode({robloxId = tostring(LP.UserId), key = SESSION_KEY or "", targetDiscordId = t})
             local ok, res = httpPost(KEY_API .. "/chat/unban", body)
-            if ok then notify("Unbanned", t, Theme.success, 3)
-            else local pretty = parseErrorReason(res); notify("Unban failed", pretty, Theme.danger, 8, pretty) end
+            if ok then
+                notify("Unbanned", t, Theme.success, 3)
+            else
+                local pretty = parseErrorReason(res)
+                notify("Unban failed", pretty, Theme.danger, 8, pretty)
+            end
         end)
     end)
 
-    section(pg2, "ONLINE STAFF", "🛡️")
+    section(pg2, "ONLINE STAFF", "STAFF")
     local staffList = new("Frame", {Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1,
         LayoutOrder = #pages[pg2]:GetChildren(), AutomaticSize = Enum.AutomaticSize.Y, ZIndex = 33}, pages[pg2])
     new("UIListLayout", {Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder}, staffList)
@@ -2583,12 +2600,14 @@ if isMod() then
         end
         local found = 0
         for _, p in ipairs(Players:GetPlayers()) do
-            local rank = getRankFor(p.UserId); local b = rank and BADGE_STYLE[rank]
+            local rank = getRankFor(p.UserId)
+            local b = rank and BADGE_STYLE[rank]
             if b then
                 found = found + 1
                 local row = tPanel(new("Frame", {Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = Theme.panel,
                     BackgroundTransparency = 0.15, LayoutOrder = found, ZIndex = 34}, staffList))
-                corner(row, 6); stroke(row, b.color, 1.4, 0.2)
+                corner(row, 6)
+                stroke(row, b.color, 1.4, 0.2)
                 new("TextLabel", {Size = UDim2.new(1, -10, 1, 0), Position = UDim2.fromOffset(12, 0),
                     BackgroundTransparency = 1, Text = string.format("%s %s  %s", b.emoji, b.label, p.Name),
                     Font = Enum.Font.GothamBold, TextSize = 10, TextColor3 = b.color,
@@ -2604,7 +2623,7 @@ if isMod() then
     end
     refreshStaff()
     buttonRow(pg2, "Refresh staff list", "REFRESH", refreshStaff)
-enddo
+end
     local pg2 = "combat"
     section(pg2, "AIMBOT", "🎯")
     toggleRow(pg2, "Aimbot.Enabled", "Aimbot")
