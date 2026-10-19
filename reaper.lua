@@ -304,21 +304,18 @@ ESPColours = {
 }
 
 --==================== STATE ====================
--- [PATCH 2] added lockedTarget, lockStartTime for aimbot target lock
 TS = {target = nil, hovered = nil, humpWasActive = false, lastSpam = 0,
-      lockedTarget = nil, lockStartTime = 0}
+      lockedTarget = nil, lockStartTime = 0, aimLockOwner = nil}
 HR = {speed = 0, smoothSpeed = 0, tier = "STILL", airborne = false, airTimer = 0,
       teleporting = false, autoMode = "Hybrid", fallingUnder = false,
       lastGood = nil, respawnPending = false}
--- [PATCH 2] added lastGoodY, anchorY, oldRootPart, initialAnchor for better fall/respawn detection
 HUMP = {
     phase = 0, smoothVel = 0, smoothAir = 0, lastTier = "STILL", lockTimer = 0,
     speedMult = 1.0, ampMult = 1.0, distMult = 1.0,
     fallHold = 0, lastGoodCF = nil, awaitingRespawn = false,
     lastGoodY = nil, anchorY = nil, oldRootPart = nil, initialAnchor = nil,
 }
--- [PATCH 2] orbit state table
-ORBIT = {angle = 0, shootCD = 0, wasActive = false}
+ORBIT = {angle = 0, shootCD = 0, wasActive = false, savedCamType = nil}
 RA = {keys = {teleport = nil, spectate = nil, hump = nil}, spectateTarget = nil, spectateZoom = 1}
 PREFERRED_KEYS = {
     Enum.KeyCode.One, Enum.KeyCode.Two, Enum.KeyCode.Three,
@@ -330,10 +327,14 @@ PREFERRED_KEYS = {
 --==================== CHAT ====================
 Chat = {messages = {}, listeners = {}, max = 400}
 chatSeenIds = {}
+chatUserTimes = {}  -- [userId string] = last-seen tick, used for active-user count
 function addChat(sender, text, isLocal, col, avatar, discordName, country, countryCode, userId, msgId, placeId, timeMs, discordId)
     if msgId then
         if chatSeenIds[msgId] then return end
         chatSeenIds[msgId] = true
+    end
+    if userId and tostring(userId) ~= "" then
+        chatUserTimes[tostring(userId)] = tick()
     end
     local e = {
         sender = sender or "?", text = tostring(text or ""),
@@ -372,9 +373,6 @@ function sendChat(text)
 end
 
 --==================== CONFIG ====================
--- [PATCH 1] Aimbot extensions: LockTarget, PredictAim, MagicBullet, PCPTeamOnly
--- [PATCH 1] New Orbit table
--- [PATCH 1] New TapBinds table
 Cfg = {
     Aimbot = {Enabled = false, Key = Enum.UserInputType.MouseButton2, ToggleMode = false,
         FOV = 180, Smoothness = 8, Strength = 6, TargetPart = "Head",
@@ -383,7 +381,7 @@ Cfg = {
         MagicBullet = false, MagicBulletWalls = true,
         PCPTeamOnly = true},
     Orbit = {Enabled = false, Radius = 8, Speed = 12, Height = 2,
-        AutoShoot = true, AutoAim = true},
+        AutoShoot = true, AutoAim = true, ForceNoclip = true},
     TapBinds = {teleport = nil, hump = nil, orbit = nil, spectate = nil},
     Trigger = {Enabled = false, Key = Enum.UserInputType.MouseButton1,
         Radius = 20, Delay = 0.05, TeamCheck = true},
@@ -655,7 +653,6 @@ end--==================== VERIFICATION ====================
 SESSION_KEY = nil
 DISCORD_USERNAME = nil
 DISCORD_ID = nil
--- [EDIT 1] Global verify store — key prompt fires ONCE across ALL places
 VERIFY_STORE = "Reaper_verified.json"
 
 local function loadVerifiedData()
@@ -694,7 +691,6 @@ local function tryOpenBrowser(url)
 end
 local function downloadAvatar(url)
     if not IO.has or type(getcustomasset) ~= "function" then return nil end
-    -- [EDIT 2] Cache filename includes URL hash so changed PFP re-downloads
     local cacheFile = "Reaper_avatar_" .. tostring(LP.UserId) .. "_" .. strHash(url) .. ".png"
     local ok, e = pcall(IO.isfile, cacheFile)
     if not ok or not e then
@@ -884,7 +880,6 @@ local function showVerifiedScreen(user)
         task.wait(0.4)
         sg:Destroy()
     end)
-    -- [EDIT 5] auto-dismiss after 60s
     task.delay(60, function()
         if not done and sg.Parent then done = true; sg:Destroy() end
     end)
@@ -929,7 +924,6 @@ local function showKeyPrompt()
         Text = "Two quick steps — takes about a minute.",
         Font = Enum.Font.Gotham, TextSize = 11, TextColor3 = Theme.muted, ZIndex = 12}, card)
 
-    -- STEP 1
     local s1 = new("Frame", {Size = UDim2.new(1, -50, 0, 240),
         Position = UDim2.fromOffset(25, 76), BackgroundColor3 = Theme.panel,
         BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 12}, card)
@@ -980,7 +974,6 @@ local function showKeyPrompt()
         TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
         TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 13}, s1)
 
-    -- STEP 2
     local s2 = new("Frame", {Size = UDim2.new(1, -50, 0, 185),
         Position = UDim2.fromOffset(25, 326), BackgroundColor3 = Theme.panel,
         BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 12}, card)
@@ -1203,7 +1196,6 @@ end
 
 --==================== VERIFY SESSION ====================
 local function verifySession()
-    -- [EDIT 3] tryCheck also calls /check-token so manual deauth is caught on startup
     local function tryCheck(k)
         if not k then return nil end
         local resp = postJSON("/check", {robloxId = tostring(LP.UserId), key = k})
@@ -1273,7 +1265,6 @@ fetchCountry(function(name, code)
     MY_USER.countryCode = code or ""
 end)
 
--- [EDIT 4] welcome screen shows on EVERY launch
 showVerifiedScreen(verifiedUser)
 
 --==================== DRAG / RESIZE ====================
@@ -1775,8 +1766,8 @@ retName = new("TextLabel", {Size = UDim2.new(1, 60, 0, 18), Position = UDim2.new
 retDist = new("TextLabel", {Size = UDim2.new(1, 60, 0, 13), Position = UDim2.new(0, -30, 1, 28),
     BackgroundTransparency = 1, Font = Enum.Font.GothamBold, TextSize = 11, TextColor3 = Theme.muted,
     Text = "", TextStrokeTransparency = 0.5, TextStrokeColor3 = Color3.new(0,0,0), ZIndex = 12}, reticle)
-retActions = new("Frame", {Size = UDim2.new(1, 100, 0, 20),
-    Position = UDim2.new(0, -50, 1, 46), BackgroundTransparency = 1, ZIndex = 13}, reticle)
+retActions = new("Frame", {Size = UDim2.new(1, 220, 0, 20),
+    Position = UDim2.new(0, -110, 1, 46), BackgroundTransparency = 1, ZIndex = 13}, reticle)
 new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal,
     HorizontalAlignment = Enum.HorizontalAlignment.Center,
     VerticalAlignment = Enum.VerticalAlignment.Center,
@@ -1785,7 +1776,6 @@ rainbowH = 0
 RS.Heartbeat:Connect(function(dt) rainbowH = (rainbowH + dt * 0.5) % 1 end)
 
 --==================== RETICLE ACTIONS ====================
--- [PATCH 7] added orbit action and lockedTarget on hump
 function runAction(id)
     local t = TS.hovered
     if not t or not t.Character then
@@ -1817,45 +1807,65 @@ function runAction(id)
         HUMP.anchorY = nil; HUMP.lastGoodY = nil; HUMP.oldRootPart = nil
         notify("Humping", t.Name, Theme.gold)
     elseif id == "orbit" then
+        -- Force orbit on (bypass widget if needed)
         TS.target = t
         TS.lockedTarget = t
-        if not Cfg.Orbit.Enabled and widgets["Orbit.Enabled"] then
-            widgets["Orbit.Enabled"].set(true)
-        end
+        Cfg.Orbit.Enabled = true
+        if widgets["Orbit.Enabled"] then widgets["Orbit.Enabled"].set(true) end
         ORBIT.angle = 0
+        ORBIT.shootCD = 0
         notify("Orbiting", t.Name .. " · auto-aim + shoot", Theme.accent3, 3)
     end
 end
+
+-- Rebuild reticle action chips. Priority: tap binds (when TapTarget on) → RA.keys fallback.
 function rebuildChips()
+    if not retActions then return end
     for _, c in ipairs(retActions:GetChildren()) do
         if not c:IsA("UIListLayout") then c:Destroy() end
     end
-    local list = {
-        {id = "teleport", label = "TP", key = RA.keys.teleport, col = Theme.neon},
-        {id = "spectate", label = "SPEC", key = RA.keys.spectate, col = Theme.accent3},
-    }
-    if Cfg.Troll.Hump then
-        list[#list + 1] = {id = "hump", label = "HUMP", key = RA.keys.hump, col = Theme.gold}
+    local list = {}
+    local tb = Cfg.TapBinds or {}
+    if Cfg.Troll.TapTarget then
+        if tb.teleport then list[#list+1] = {id = "teleport", label = "TP", key = tb.teleport, col = Theme.neon} end
+        if tb.hump then list[#list+1] = {id = "hump", label = "HUMP", key = tb.hump, col = Theme.gold} end
+        if tb.orbit then list[#list+1] = {id = "orbit", label = "ORBIT", key = tb.orbit, col = Theme.accent3} end
+        if tb.spectate then list[#list+1] = {id = "spectate", label = "SPEC", key = tb.spectate, col = Theme.accent3} end
+    end
+    -- RA.keys fallbacks (only for actions the user didn't already bind)
+    if RA.keys.teleport and not (Cfg.Troll.TapTarget and tb.teleport) then
+        list[#list+1] = {id = "teleport", label = "TP", key = RA.keys.teleport, col = Theme.neon}
+    end
+    if RA.keys.spectate and not (Cfg.Troll.TapTarget and tb.spectate) then
+        list[#list+1] = {id = "spectate", label = "SPEC", key = RA.keys.spectate, col = Theme.accent3}
+    end
+    if Cfg.Troll.Hump and RA.keys.hump and not (Cfg.Troll.TapTarget and tb.hump) then
+        list[#list+1] = {id = "hump", label = "HUMP", key = RA.keys.hump, col = Theme.gold}
     end
     for _, a in ipairs(list) do
         if a.key then
             local chip = new("TextButton", {
                 Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X,
-                BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.2,
+                BackgroundColor3 = Theme.panel, BackgroundTransparency = 0.15,
                 Text = a.label .. " [" .. a.key.Name .. "]", Font = Enum.Font.GothamBold,
                 TextSize = 9, TextColor3 = a.col, AutoButtonColor = false, ZIndex = 14,
             }, retActions)
-            corner(chip, 4)
-            new("UIPadding", {PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, chip)
-            local cs = stroke(chip, a.col, 1, 0.35)
+            corner(chip, 5)
+            new("UIPadding", {PaddingLeft = UDim.new(0, 7), PaddingRight = UDim.new(0, 7)}, chip)
+            local cs = stroke(chip, a.col, 1, 0.3)
+            local chipGrad = grad(chip, a.col, Theme.panel, 90)
+            chipGrad.Transparency = NumberSequence.new({
+                NumberSequenceKeypoint.new(0, 0.55),
+                NumberSequenceKeypoint.new(1, 0.85),
+            })
             chip.MouseButton1Click:Connect(function() runAction(a.id); pulse(chip, 1.1, 0.08) end)
             chip.MouseEnter:Connect(function()
                 Tween:Create(chip, TweenInfo.new(0.12), {BackgroundTransparency = 0}):Play()
                 cs.Transparency = 0
             end)
             chip.MouseLeave:Connect(function()
-                Tween:Create(chip, TweenInfo.new(0.15), {BackgroundTransparency = 0.2}):Play()
-                cs.Transparency = 0.35
+                Tween:Create(chip, TweenInfo.new(0.15), {BackgroundTransparency = 0.15}):Play()
+                cs.Transparency = 0.3
             end)
         end
     end
@@ -2142,9 +2152,7 @@ function closeMenu()
     else
         menu.Visible = false
     end
-end
-
---==================== WIDGETS ====================
+end--==================== WIDGETS ====================
 pages = {}; tabs = {}; widgets = {}
 toggleLabels = {}
 pendingKeybind = nil
@@ -2256,7 +2264,6 @@ function collapsible(pageId, title, open)
     return holder, hdr
 end
 
--- [PATCH 12 + 13] toggleRow with animated slide on both click and programmatic change
 function toggleRow(pageId, path, label, onChange)
     local page = resolvePage(pageId)
     if not page then return end
@@ -2318,7 +2325,6 @@ function toggleRow(pageId, path, label, onChange)
         local changed = nv ~= state
         state = nv
         setPath(Cfg, path, state)
-        -- [PATCH 13] animate on programmatic change too
         if changed then
             local tgoal = state and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
             Tween:Create(thumb, TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
@@ -2349,13 +2355,21 @@ function toggleRow(pageId, path, label, onChange)
                 HUMP.anchorY = nil; HUMP.lastGoodY = nil; HUMP.oldRootPart = nil
             end
         end
+        if path == "Troll.TapTarget" then
+            pcall(rebuildChips)
+        end
+        if path == "Orbit.Enabled" and not state then
+            ORBIT.wasActive = false
+            if Cam.CameraType == Enum.CameraType.Scriptable and not Cfg.Movement.Freecam and not RA.spectateTarget then
+                Cam.CameraType = Enum.CameraType.Custom
+            end
+        end
         if fire ~= false and onChange then pcall(onChange, state) end
         if changed then pcall(refreshHUD); pcall(refreshAD) end
     end
     widgets[path] = {set = set, get = function() return state end,
         rerender = render, refreshKey = refreshKey, label = label}
     render()
-    -- [PATCH 12] animated slide on click
     track.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
             local turningOn = not state
@@ -2780,7 +2794,9 @@ if isMod() then
     table.insert(tabOrder, 2, "owner")
     tabTitles.owner = "👑 OWNER"
 end
-for _, id in ipairs(tabOrder) do makeTab(id, tabTitles[id]) end--==================== MODERATION HELPERS ====================
+for _, id in ipairs(tabOrder) do makeTab(id, tabTitles[id]) end
+
+--==================== MODERATION HELPERS ====================
 function doModBan(targetDiscordId, reason, duration)
     if not targetDiscordId or targetDiscordId == "" then
         notify("Ban", "No Discord ID available", Theme.gold, 3); return
@@ -2897,9 +2913,8 @@ local function openQuickMod(target)
         mkBtn(224, "🗑  Delete this message", Theme.danger, function() doModDelete(target.msgId) end)
     end
     mkBtn(254, "✕  Cancel", Theme.muted, function() end)
-end
-
---====================== HOME ======================
+end--====================== HOME ======================
+chatLiveLbl = nil  -- hoisted so the user-count tracker can update it
 do
     local pg2 = "home"
     section(pg2, "PROFILE", "👤")
@@ -2936,8 +2951,8 @@ do
         Position = UDim2.new(0, 4, 1, -58), BackgroundColor3 = Theme.panel2,
         BackgroundTransparency = 0.3, BorderSizePixel = 0, ZIndex = 34}, chatHolder))
     corner(userBar, 4)
-    new("TextLabel", {Size = UDim2.new(1, -30, 1, 0), Position = UDim2.fromOffset(12, 0),
-        BackgroundTransparency = 1, Text = "● live · global · polling 4s",
+    chatLiveLbl = new("TextLabel", {Size = UDim2.new(1, -30, 1, 0), Position = UDim2.fromOffset(12, 0),
+        BackgroundTransparency = 1, Text = "● live · counting…",
         Font = Enum.Font.GothamBold, TextSize = 9, TextColor3 = Theme.success,
         TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 35}, userBar)
 
@@ -3095,6 +3110,26 @@ do
                                 m.userId, m.id, m.placeId, m.time, m.discordId)
                     end
                 end
+            end
+        end
+    end)
+
+    -- Live "N users" counter, rolling 5-minute window
+    task.spawn(function()
+        while gui and gui.Parent do
+            task.wait(5)
+            local now = tick()
+            local count = 0
+            for uid, t in pairs(chatUserTimes) do
+                if now - t < 300 then
+                    count = count + 1
+                else
+                    chatUserTimes[uid] = nil
+                end
+            end
+            if chatLiveLbl and chatLiveLbl.Parent then
+                chatLiveLbl.Text = "● live · " .. count .. " user" ..
+                    (count == 1 and "" or "s") .. " active · polling 4s"
             end
         end
     end)
@@ -3287,8 +3322,6 @@ if isMod() then
 end
 
 --====================== COMBAT ======================
--- [PATCH 10] new rows: LockTarget, PCPTeamOnly, PredictAim, PredictAmount,
--- MagicBullet, MagicBulletWalls, and the whole ORBIT section
 do
     local pg2 = "combat"
     section(pg2, "AIMBOT", "🎯")
@@ -3306,7 +3339,7 @@ do
     toggleRow(pg2, "Aimbot.TeamCheck", "Team Check")
     toggleRow(pg2, "Aimbot.VisibleOnly", "Visible Only")
     toggleRow(pg2, "Aimbot.ShowCircle", "Show FOV Circle")
-    toggleRow(pg2, "Aimbot.LockTarget", "Lock Target (stay on same player)")
+    toggleRow(pg2, "Aimbot.LockTarget", "🔒 Single Target Lock")
     toggleRow(pg2, "Aimbot.PCPTeamOnly", "PCP: only target opposite team")
     toggleRow(pg2, "Aimbot.PredictAim", "Prediction (lead moving targets)")
     sliderRow(pg2, "Aimbot.PredictAmount", "Prediction Amount", 0.02, 0.25, 2)
@@ -3314,9 +3347,15 @@ do
     toggleRow(pg2, "Aimbot.MagicBulletWalls", "✨ Wallbang (through walls)")
 
     section(pg2, "ORBIT", "🌀")
+    new("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
+        Text = "main aimbot is suspended while orbiting — orbit uses its own aim + hitscan",
+        Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = Theme.muted,
+        TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true,
+        LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
     toggleRow(pg2, "Orbit.Enabled", "Orbit Target")
-    toggleRow(pg2, "Orbit.AutoAim", "Auto-Aim while orbiting")
-    toggleRow(pg2, "Orbit.AutoShoot", "Auto-Shoot while orbiting")
+    toggleRow(pg2, "Orbit.AutoAim", "Auto-Aim camera while orbiting")
+    toggleRow(pg2, "Orbit.AutoShoot", "Auto-Shoot (magic bullet mode)")
+    toggleRow(pg2, "Orbit.ForceNoclip", "Force Noclip while orbiting")
     sliderRow(pg2, "Orbit.Radius", "Radius", 3, 30, 1)
     sliderRow(pg2, "Orbit.Speed", "Speed", 3, 40, 1)
     sliderRow(pg2, "Orbit.Height", "Height Offset", -5, 10, 1)
@@ -3330,9 +3369,7 @@ do
     sliderRow(pg2, "Trigger.Radius", "Radius", 0, 100, 0)
     sliderRow(pg2, "Trigger.Delay", "Delay (s)", 0.01, 0.5, 2)
     toggleRow(pg2, "Trigger.TeamCheck", "Team Check")
-end
-
---====================== VISUAL ======================
+end--====================== VISUAL ======================
 do
     local pg2 = "visual"
     section(pg2, "ESP", "👁")
@@ -3404,7 +3441,9 @@ do
     section(pg2, "PHYSICS", "🌀")
     toggleRow(pg2, "World.GravityEnabled", "Gravity Control")
     sliderRow(pg2, "World.Gravity", "Gravity", 0, 500, 0)
-end--====================== PLAYERS ======================
+end
+
+--====================== PLAYERS ======================
 do
     local pg2 = "players"
     section(pg2, "PLAYER LIST", "👥")
@@ -3486,12 +3525,11 @@ do
     toggleRow(pg2, "Troll.TapTarget", "Tap to Target")
     sliderRow(pg2, "Troll.TapRadius", "Crosshair Radius", 5, 200, 0)
 
-    -- [PATCH 8] Tap-to-target key bindings
     section(pg2, "TAP-TO-TARGET BINDS", "⌨")
     new("TextLabel", {Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1,
-        Text = "press key while hovering a player to run the action",
+        Text = "press key while hovering a player — chips appear under the reticle ring",
         Font = Enum.Font.Gotham, TextSize = 9, TextColor3 = Theme.muted,
-        TextXAlignment = Enum.TextXAlignment.Left,
+        TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true,
         LayoutOrder = #pages[pg2]:GetChildren(), ZIndex = 33}, pages[pg2])
 
     buttonRow(pg2, "Bind: Teleport on hover", "BIND", function(b)
@@ -3528,9 +3566,7 @@ do
     toggleRow(hb, "Troll.HumpUsePlatform", "Use PlatformStand")
     toggleRow(hb, "Troll.HumpOverrideFly", "Override Fly")
     toggleRow(hb, "Troll.HumpVelMatch", "Velocity Match")
-end
-
---====================== UTIL ======================
+end--====================== UTIL ======================
 do
     local pg2 = "util"
     section(pg2, "AUTO", "⚙")
@@ -3613,6 +3649,7 @@ do
                         if v ~= nil then pcall(w.set, v, false) end
                     end
                     applyTheme(); applyOpacity(Cfg.UI.MenuOpacity or 0)
+                    pcall(rebuildChips)
                     notify("Loaded", name, Theme.success, 2.5)
                     refreshList()
                 else
@@ -3703,8 +3740,9 @@ statusLbl.Text = "REAPER  ·  place " .. tostring(game.PlaceId) ..
     (DISCORD_USERNAME and ("  ·  @" .. DISCORD_USERNAME) or "")
 pcall(refreshHUD)
 pcall(refreshAD)
-rebuildChips()--==================== PERIODIC VERIFICATION CHECK ====================
--- [EDIT 6/7/8] Every 60s /check. Every 5th (5min) /check-token with kick.
+pcall(rebuildChips)
+
+--==================== PERIODIC VERIFICATION CHECK ====================
 task.spawn(function()
     local rePrompting = false
     local counter = 0
@@ -3782,9 +3820,7 @@ task.spawn(function()
             end
         end
     end
-end)
-
---==================== CROSSHAIR LOOP ====================
+end)--==================== CROSSHAIR LOOP ====================
 task.spawn(function()
     while crossGui.Parent do
         RS.RenderStepped:Wait()
@@ -3895,6 +3931,7 @@ task.spawn(function()
     end
 end)
 
+--==================== SPECTATE ====================
 RS.RenderStepped:Connect(function(dt)
     pcall(function()
         local t = RA.spectateTarget
@@ -3912,7 +3949,8 @@ RS.RenderStepped:Connect(function(dt)
                 local want = hrp_.Position + hrp_.CFrame.LookVector * -d + Vector3.new(0, 3 * RA.spectateZoom, 0)
                 Cam.CFrame = Cam.CFrame:Lerp(CFrame.new(want, hrp_.Position + hrp_.CFrame.LookVector), math.clamp(dt * 6, 0, 1))
             end
-        elseif Cam.CameraType == Enum.CameraType.Scriptable and not Cfg.Movement.Freecam then
+        elseif Cam.CameraType == Enum.CameraType.Scriptable and not Cfg.Movement.Freecam
+            and not Cfg.Orbit.Enabled and not RA.spectateTarget then
             Cam.CameraType = Enum.CameraType.Custom
         end
     end)
@@ -3927,7 +3965,6 @@ function tbFocused()
     return ok and tb ~= nil
 end
 
--- [PATCH 9] hover helper for tap-to-target keybinds
 function getHoveredPlayer()
     local m = UIS:GetMouseLocation()
     local ray = Cam:ViewportPointToRay(m.X, m.Y)
@@ -3977,6 +4014,7 @@ UIS.InputBegan:Connect(function(i, gpe)
             if pendingKeybind and pendingKeybind.btn then pendingKeybind.btn.Text = key.Name end
             pendingKeybind = nil
             pcall(refreshHUD)
+            pcall(rebuildChips)
         end
         return
     end
@@ -3994,32 +4032,33 @@ UIS.InputBegan:Connect(function(i, gpe)
         if Cfg.UI.ADKey and i.KeyCode == Cfg.UI.ADKey then
             Cfg.UI.AD = not Cfg.UI.AD; pcall(refreshAD); return
         end
-        if RA.keys.teleport and i.KeyCode == RA.keys.teleport then runAction("teleport"); return end
-        if RA.keys.spectate and i.KeyCode == RA.keys.spectate then runAction("spectate"); return end
-        if RA.keys.hump and i.KeyCode == RA.keys.hump and Cfg.Troll.Hump then runAction("hump"); return end
 
-        -- [PATCH 9] tap-to-target binds — only fire if a player is under the crosshair
+        -- PRIORITY 1: user-defined tap binds
         local tbind = Cfg.TapBinds or {}
         if (tbind.teleport and i.KeyCode == tbind.teleport) or
            (tbind.hump and i.KeyCode == tbind.hump) or
            (tbind.orbit and i.KeyCode == tbind.orbit) or
            (tbind.spectate and i.KeyCode == tbind.spectate) then
             local hovered = getHoveredPlayer()
-            if not hovered or not hovered.Character then
-                return  -- no target → do nothing, don't notify
-            end
-            TS.hovered = hovered
-            if tbind.teleport and i.KeyCode == tbind.teleport then
-                runAction("teleport")
-            elseif tbind.hump and i.KeyCode == tbind.hump then
-                runAction("hump")
-            elseif tbind.orbit and i.KeyCode == tbind.orbit then
-                runAction("orbit")
-            elseif tbind.spectate and i.KeyCode == tbind.spectate then
-                runAction("spectate")
+            if hovered and hovered.Character then
+                TS.hovered = hovered
+                if tbind.teleport and i.KeyCode == tbind.teleport then
+                    runAction("teleport")
+                elseif tbind.hump and i.KeyCode == tbind.hump then
+                    runAction("hump")
+                elseif tbind.orbit and i.KeyCode == tbind.orbit then
+                    runAction("orbit")
+                elseif tbind.spectate and i.KeyCode == tbind.spectate then
+                    runAction("spectate")
+                end
             end
             return
         end
+
+        -- PRIORITY 2: auto-assigned RA.keys (only if user didn't bind a tap key for that action)
+        if RA.keys.teleport and i.KeyCode == RA.keys.teleport then runAction("teleport"); return end
+        if RA.keys.spectate and i.KeyCode == RA.keys.spectate then runAction("spectate"); return end
+        if RA.keys.hump and i.KeyCode == RA.keys.hump and Cfg.Troll.Hump then runAction("hump"); return end
     end
     if gpe then return end
     if i.UserInputType == Enum.UserInputType.MouseButton2 and Cfg.Aimbot.Enabled and not tbFocused() then
@@ -4066,7 +4105,7 @@ logo.MouseButton1Click:Connect(function()
     if menu.Visible then closeMenu() else openMenu() end
 end)
 
---==================== AIMBOT ====================
+--==================== AIMBOT (single-target lock) ====================
 function bindDown(b)
     if not b or typeof(b) ~= "EnumItem" then return false end
     if b.EnumType == Enum.KeyCode then return UIS:IsKeyDown(b) end
@@ -4083,7 +4122,6 @@ fovCircle = new("Frame", {AnchorPoint = Vector2.new(0.5, 0.5),
 corner(fovCircle, 10000)
 tAcc(stroke(fovCircle, Theme.neon, 1, 0.4))
 
--- [PATCH 3] PCP role filter + target locking + prediction
 local function pcpAllowed(p)
     if not Cfg.Aimbot.PCPTeamOnly then return true end
     if Cfg.Visuals.Mode ~= "PCP" then return true end
@@ -4100,6 +4138,22 @@ local function pcpAllowed(p)
     return true
 end
 
+-- Validates a locked target — returns part if still good, else nil
+local function validLockedTarget(lt)
+    if not lt or not lt.Parent or not lt.Character then return nil end
+    local tH = lt.Character:FindFirstChildOfClass("Humanoid")
+    if not tH or tH.Health <= 0 then return nil end
+    if not pcpAllowed(lt) then return nil end
+    local mR = hrp()
+    if not mR then return nil end
+    local part = lt.Character:FindFirstChild(Cfg.Aimbot.TargetPart)
+              or lt.Character:FindFirstChild("Head")
+    if not part then return nil end
+    local sd = (mR.Position - part.Position).Magnitude
+    if sd > Cfg.Aimbot.MaxDist then return nil end
+    return part
+end
+
 function aimTarget()
     local c = LP.Character
     if not c then return nil end
@@ -4108,31 +4162,17 @@ function aimTarget()
     local center = Vector2.new(Cam.ViewportSize.X / 2, Cam.ViewportSize.Y / 2)
     local maxD = Cfg.Aimbot.FOV
 
-    -- Locked target takes priority if still valid and within 1.5x FOV
+    -- LOCKED TARGET TAKES ABSOLUTE PRIORITY
+    -- Stays until: target dies / leaves / goes out of MaxDist / user releases aim / LockTarget off
     if Cfg.Aimbot.LockTarget and TS.lockedTarget then
-        local lt = TS.lockedTarget
-        if lt.Parent and lt.Character then
-            local tH = lt.Character:FindFirstChildOfClass("Humanoid")
-            if tH and tH.Health > 0 and pcpAllowed(lt) then
-                local part = lt.Character:FindFirstChild(Cfg.Aimbot.TargetPart)
-                          or lt.Character:FindFirstChild("Head")
-                if part then
-                    local sd = (mR.Position - part.Position).Magnitude
-                    if sd <= Cfg.Aimbot.MaxDist then
-                        local sp, on = Cam:WorldToViewportPoint(part.Position)
-                        if on and sp.Z > 0 then
-                            local d = (Vector2.new(sp.X, sp.Y) - center).Magnitude
-                            if d <= maxD * 1.5 then
-                                return part, lt
-                            end
-                        end
-                    end
-                end
-            end
+        local part = validLockedTarget(TS.lockedTarget)
+        if part then
+            return part, TS.lockedTarget
         end
         TS.lockedTarget = nil
     end
 
+    -- Fresh acquisition
     local best, bestD, bestPart = nil, maxD, nil
     for _, p in ipairs(Players:GetPlayers()) do
         if p ~= LP and p.Character and pcpAllowed(p) then
@@ -4172,24 +4212,47 @@ function aimTarget()
     return bestPart, best
 end
 
--- [PATCH 4] render loop with prediction, distance-aware smoothing, Scriptable-cam awareness
 RS.RenderStepped:Connect(function(dt)
     pcall(function()
-        local showFov = Cfg.Aimbot.Enabled and Cfg.Aimbot.ShowCircle
+        -- FOV circle visibility
+        local showFov = Cfg.Aimbot.Enabled and Cfg.Aimbot.ShowCircle and not Cfg.Orbit.Enabled
         if fovCircle.Visible ~= showFov then fovCircle.Visible = showFov end
         if showFov then fovCircle.Size = UDim2.fromOffset(Cfg.Aimbot.FOV * 2, Cfg.Aimbot.FOV * 2) end
+
+        -- Orbit takes over aim; main aimbot suspended
+        if Cfg.Orbit.Enabled then
+            if not aiming then
+                -- orbit active but user hasn't held aim — do not affect lock
+            else
+                -- orbit uses its own camera; main aimbot does nothing
+            end
+            -- clear aimbot-only lock if user stops aiming (orbit uses TS.lockedTarget directly)
+            if not aiming and TS.lockedTarget and not Cfg.Troll.Hump then
+                TS.lockedTarget = nil
+            end
+            return
+        end
+
         if not Cfg.Aimbot.Enabled then
             aiming = false; aimToggled = false
-            if TS.lockedTarget then TS.lockedTarget = nil end
+            if TS.lockedTarget and not Cfg.Troll.Hump then TS.lockedTarget = nil end
             return
         end
         if Cfg.Aimbot.ToggleMode then aiming = aimToggled
         else aiming = bindDown(Cfg.Aimbot.Key) end
-        if not aiming then return end
+
+        -- Clear lock only when we're not aiming (but preserve for hump)
+        if not aiming then
+            if TS.lockedTarget and not Cfg.Troll.Hump then
+                TS.lockedTarget = nil
+            end
+            return
+        end
+
         local part, target = aimTarget()
         if not part then return end
 
-        -- Prediction: lead moving targets
+        -- Prediction
         local aimPos = part.Position
         if Cfg.Aimbot.PredictAim then
             local vel = part.AssemblyLinearVelocity
@@ -4213,7 +4276,7 @@ RS.RenderStepped:Connect(function(dt)
     end)
 end)
 
--- [PATCH 5] Magic Bullet + Wallbang (best-effort, only works on client-side hitreg games)
+--==================== MAGIC BULLET (aimbot + orbit) ====================
 pcall(function()
     local mt = getrawmetatable(game)
     if not mt then return end
@@ -4223,7 +4286,9 @@ pcall(function()
     setreadonly(mt, false)
 
     local function getMBTarget()
-        if not (Cfg.Aimbot.MagicBullet and Cfg.Aimbot.Enabled) then return nil end
+        local aimActive = Cfg.Aimbot.MagicBullet and Cfg.Aimbot.Enabled and not Cfg.Orbit.Enabled
+        local orbitActive = Cfg.Orbit.Enabled and Cfg.Orbit.AutoShoot
+        if not (aimActive or orbitActive) then return nil end
         local t = TS.lockedTarget
         if not t or not t.Parent or not t.Character then return nil end
         local h = t.Character:FindFirstChildOfClass("Humanoid")
@@ -4260,11 +4325,12 @@ pcall(function()
                       or t.Character:FindFirstChild("Head")
             if head then
                 local args = {...}
+                local wallsOK = Cfg.Aimbot.MagicBulletWalls or (Cfg.Orbit.Enabled and Cfg.Orbit.AutoShoot)
                 if method == "Raycast" and #args >= 2 then
                     local origin, direction = args[1], args[2]
                     if typeof(origin) == "Vector3" and typeof(direction) == "Vector3" then
                         args[2] = (head.Position - origin).Unit * (direction.Magnitude + 200)
-                        if Cfg.Aimbot.MagicBulletWalls and #args >= 3 then
+                        if wallsOK and #args >= 3 then
                             local newP = RaycastParams.new()
                             newP.FilterType = Enum.RaycastFilterType.Include
                             newP.FilterDescendantsInstances = {t.Character}
@@ -4277,7 +4343,7 @@ pcall(function()
                     local ray = args[1]
                     if typeof(ray) == "Ray" then
                         args[1] = Ray.new(ray.Origin, (head.Position - ray.Origin).Unit * (ray.Direction.Magnitude + 200))
-                        if Cfg.Aimbot.MagicBulletWalls and method == "FindPartOnRayWithWhitelist" and #args >= 2 then
+                        if wallsOK and method == "FindPartOnRayWithWhitelist" and #args >= 2 then
                             args[2] = {t.Character}
                         end
                         return oldNamecall(self, unpack(args))
@@ -4291,7 +4357,7 @@ pcall(function()
     setreadonly(mt, true)
 end)
 
--- [PATCH 6] Orbit heartbeat
+--==================== ORBIT (with noclip + camera + hitscan) ====================
 RS.Heartbeat:Connect(function(dt)
     pcall(function()
         if not Cfg.Orbit.Enabled then
@@ -4300,6 +4366,10 @@ RS.Heartbeat:Connect(function(dt)
                 if h and not Cfg.Troll.Hump then
                     h.PlatformStand = false
                     h.AutoRotate = true
+                end
+                if Cam.CameraType == Enum.CameraType.Scriptable
+                    and not Cfg.Movement.Freecam and not RA.spectateTarget then
+                    Cam.CameraType = Enum.CameraType.Custom
                 end
                 ORBIT.wasActive = false
             end
@@ -4314,8 +4384,15 @@ RS.Heartbeat:Connect(function(dt)
         local mH = hum()
         if not (tR and tH and tH.Health > 0 and mR and mH) then return end
         ORBIT.wasActive = true
+
+        -- FORCE NOCLIP while orbiting
+        if Cfg.Orbit.ForceNoclip and LP.Character then
+            noclipChar(LP.Character)
+        end
+
         if not mH.PlatformStand then mH.PlatformStand = true end
         mH.AutoRotate = false
+
         ORBIT.angle = ORBIT.angle + dt * Cfg.Orbit.Speed
         local rad = Cfg.Orbit.Radius
         local hgt = Cfg.Orbit.Height
@@ -4324,15 +4401,28 @@ RS.Heartbeat:Connect(function(dt)
         mR.CFrame = CFrame.lookAt(desired, tR.Position + Vector3.new(0, hgt, 0))
         mR.AssemblyLinearVelocity = Vector3.zero
         mR.AssemblyAngularVelocity = Vector3.zero
+
+        -- Auto-aim: position camera behind orbit and look at target head
         if Cfg.Orbit.AutoAim then
             local head = tc:FindFirstChild(Cfg.Aimbot.TargetPart) or tc:FindFirstChild("Head")
             if head then
-                Cam.CFrame = CFrame.lookAt(Cam.CFrame.Position, head.Position)
+                if Cam.CameraType ~= Enum.CameraType.Scriptable then
+                    Cam.CameraType = Enum.CameraType.Scriptable
+                end
+                local backDir = (mR.Position - tR.Position)
+                if backDir.Magnitude < 0.1 then backDir = Vector3.new(0, 0, 1) end
+                backDir = backDir.Unit
+                local camPos = mR.Position + backDir * 6 + Vector3.new(0, 3, 0)
+                local lookTarget = head.Position
+                Cam.CFrame = Cam.CFrame:Lerp(CFrame.lookAt(camPos, lookTarget), math.clamp(dt * 15, 0, 1))
             end
         end
+
+        -- Auto-shoot (magic bullet redirects the click to the target)
         ORBIT.shootCD = ORBIT.shootCD - dt
         if Cfg.Orbit.AutoShoot and ORBIT.shootCD <= 0 then
-            ORBIT.shootCD = 0.05
+            ORBIT.shootCD = 0.06
+            TS.lockedTarget = t   -- ensure magic-bullet target
             pcall(function()
                 local m = LP:GetMouse()
                 VirtualUser:CaptureController()
@@ -4340,7 +4430,9 @@ RS.Heartbeat:Connect(function(dt)
             end)
         end
     end)
-end)--==================== TRIGGERBOT ====================
+end)
+
+--==================== TRIGGERBOT ====================
 triggerAcc = 0
 RS.Heartbeat:Connect(function(dt)
     pcall(function()
@@ -4557,7 +4649,9 @@ function stopFly()
     if flyGyro then flyGyro:Destroy(); flyGyro = nil end
     flyVelTarget, flySmoothedVel = Vector3.zero, Vector3.zero
     local h = hum()
-    if h and not Cfg.Troll.Hump then h.PlatformStand = false; h.AutoRotate = true end
+    if h and not Cfg.Troll.Hump and not Cfg.Orbit.Enabled then
+        h.PlatformStand = false; h.AutoRotate = true
+    end
 end
 function startFly()
     local c = LP.Character
@@ -4609,7 +4703,9 @@ RS.Heartbeat:Connect(function(dt)
     pcall(function()
         local c = LP.Character
         if c then
-            if Cfg.Movement.Noclip then noclipChar(c)
+            -- Noclip: manual toggle OR orbit force
+            local wantNoclip = Cfg.Movement.Noclip or (Cfg.Orbit.Enabled and Cfg.Orbit.ForceNoclip)
+            if wantNoclip then noclipChar(c)
             else
                 for _, p in ipairs(c:GetDescendants()) do
                     if p:IsA("BasePart") and not p.CanCollide then
@@ -4666,7 +4762,8 @@ RS.Heartbeat:Connect(function(dt)
                 end
             end
             local humpActive = Cfg.Troll.Hump and TS.target ~= nil
-            local flySuppress = humpActive and Cfg.Troll.HumpOverrideFly
+            local orbitActive = Cfg.Orbit.Enabled
+            local flySuppress = (humpActive and Cfg.Troll.HumpOverrideFly) or orbitActive
             if Cfg.Movement.Fly and r and h and not Cfg.Movement.Freecam and not flySuppress then
                 startFly(); wasFlying = true
                 local dir = Vector3.zero
@@ -4697,7 +4794,7 @@ RS.Heartbeat:Connect(function(dt)
         end
         if Cfg.Movement.Spinbot and c then
             local r = c:FindFirstChild("HumanoidRootPart")
-            if r and not Cfg.Troll.Hump then
+            if r and not Cfg.Troll.Hump and not Cfg.Orbit.Enabled then
                 spinAngle = spinAngle + dt * 15
                 r.CFrame = CFrame.new(r.Position) * CFrame.Angles(0, spinAngle, 0)
             end
@@ -4777,7 +4874,9 @@ UIS.JumpRequest:Connect(function()
     if not Cfg.Movement.InfiniteJump then return end
     local h = hum()
     if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
-end)--==================== FLING ====================
+end)
+
+--==================== FLING ====================
 flinging = false
 function flingPlayer(p)
     if flinging or not p or not p.Character then return end
@@ -4830,7 +4929,7 @@ function getTargetPlayer()
     return best
 end
 
--- Auto-detect heartbeat (speed/tier tracking)
+-- Auto-detect heartbeat
 RS.Heartbeat:Connect(function(dt)
     pcall(function()
         if not Cfg.Troll.HumpAutoDetect then return end
@@ -4883,7 +4982,6 @@ RS.Heartbeat:Connect(function(dt)
     end)
 end)
 
--- [PATCH 11] Hump positioning + fall/respawn/desync improvements
 RS.Heartbeat:Connect(function(dt)
     pcall(function()
         if Cfg.Troll.FollowTarget then
@@ -4912,7 +5010,6 @@ RS.Heartbeat:Connect(function(dt)
                     local tR = t.Character and t.Character:FindFirstChild("HumanoidRootPart")
                     local tH = t.Character and t.Character:FindFirstChildOfClass("Humanoid")
 
-                    -- Respawn handling: wait for NEW root part (fresh character)
                     if HUMP.awaitingRespawn then
                         if tR and tH and tH.Health > 0 and tR ~= HUMP.oldRootPart then
                             HUMP.awaitingRespawn = false
@@ -4932,7 +5029,6 @@ RS.Heartbeat:Connect(function(dt)
                         end
                     end
 
-                    -- Dead / gone
                     if not tR or not tH or tH.Health <= 0 then
                         if Cfg.Troll.HumpFallProtect then
                             if not HUMP.awaitingRespawn then
@@ -4951,13 +5047,11 @@ RS.Heartbeat:Connect(function(dt)
                     local tVelY = tR.AssemblyLinearVelocity.Y
                     local tVel = tR.AssemblyLinearVelocity
 
-                    -- Anchor Y tracking (recent safe Y position)
                     if not HUMP.anchorY then HUMP.anchorY = tY end
                     if tY > HUMP.anchorY - 30 then
                         HUMP.anchorY = math.max(HUMP.anchorY, tY)
                     end
 
-                    -- Deadly fall detection (under map / big drop / fast fall)
                     local isUnderMap    = tY < -30
                     local isBigDrop     = (HUMP.anchorY - tY) > 300
                     local isFastFall    = tVelY < -200
@@ -4986,7 +5080,6 @@ RS.Heartbeat:Connect(function(dt)
                     end
                     HR.fallingUnder = false
 
-                    -- Update last safe position
                     if tY > -20 and tVelY > -100 then
                         HUMP.lastGoodCF = mR.CFrame
                         HUMP.lastGoodY = tY
@@ -4998,7 +5091,7 @@ RS.Heartbeat:Connect(function(dt)
                     if Cfg.Troll.HumpUsePlatform then
                         if not mH.PlatformStand then mH.PlatformStand = true end
                     else
-                        if mH.PlatformStand then mH.PlatformStand = false end
+                        if mH.PlatformStand and not Cfg.Orbit.Enabled then mH.PlatformStand = false end
                     end
                     local sm_ = Cfg.Troll.HumpAutoDetect and HUMP.speedMult or 1
                     local am_ = Cfg.Troll.HumpAutoDetect and HUMP.ampMult or 1
@@ -5009,7 +5102,6 @@ RS.Heartbeat:Connect(function(dt)
                     HUMP.phase = HUMP.phase + dt * useSpeed
                     if HUMP.phase > math.pi * 2000 then HUMP.phase = HUMP.phase % (math.pi * 2) end
 
-                    -- Desync prediction: extrapolate target position by velocity
                     local predictLead = math.clamp(tVel.Magnitude / 500, 0, 0.12)
                     local pos = tR.Position + tVel * predictLead
                     local look = tR.CFrame.LookVector
@@ -5028,7 +5120,6 @@ RS.Heartbeat:Connect(function(dt)
                     mR.AssemblyAngularVelocity = Vector3.zero
                     if Cfg.Troll.HumpVelMatch then mR.AssemblyLinearVelocity = tVel
                     else mR.AssemblyLinearVelocity = Vector3.zero end
-                    if Cfg.Movement.Noclip then noclipChar(mC) end
                     TS.humpWasActive = true
                 end
             else
